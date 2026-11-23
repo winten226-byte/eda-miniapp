@@ -102,7 +102,7 @@ def render_card(product: dict) -> str:
     image = product.get("image") or ""
     if image:
         img_html = (
-            f"<img src='{esc(image)}' alt='' loading='lazy' decoding='async' "
+            f"<img src='{esc(image)}' alt='{esc(product['name'])}' loading='lazy' decoding='async' "
             "onerror=\"this.style.display='none';this.nextElementSibling.style.display='grid'\">"
             "<span class='img-fallback' aria-hidden='true'>🛍️</span>"
         )
@@ -340,11 +340,21 @@ def render_page(
   }}
   .card[hidden] {{ display: none; }}
   .thumb {{
-    flex: 0 0 88px; height: 112px; border-radius: 12px; overflow: hidden;
-    background: var(--surface-2); display: grid; place-items: center;
+    flex: 0 0 96px; height: 116px; border-radius: 12px; overflow: hidden;
+    background: #ffffff; border: 1px solid rgba(23,33,58,.08);
+    padding: 6px; display: flex; align-items: center; justify-content: center;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.6);
   }}
-  .thumb img {{ width: 100%; height: 100%; object-fit: contain; display: block; }}
-  .img-fallback {{ display: none; place-items: center; font-size: 28px; opacity: .5; }}
+  .thumb img {{
+    max-width: 100%; max-height: 100%; width: auto; height: auto;
+    object-fit: contain; display: block; border-radius: 6px;
+    transition: transform .2s ease;
+  }}
+  .card:hover .thumb img {{ transform: scale(1.05); }}
+  .img-fallback {{
+    display: none; align-items: center; justify-content: center;
+    width: 100%; height: 100%; font-size: 28px; color: #475569; opacity: .75;
+  }}
   .body {{ flex: 1; min-width: 0; display: flex; flex-direction: column; }}
   .tags {{ display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }}
   .store {{ font-weight: 800; color: var(--green); font-size: 13px; }}
