@@ -86,23 +86,30 @@ def register_handlers(
         photo: object = START_IMAGE_URL or (
             FSInputFile(START_IMAGE) if START_IMAGE.exists() else None
         )
-        if photo:
-            await message.answer_photo(
-                photo=photo,  # type: ignore[arg-type]
-                caption=START_CAPTION,
-                reply_markup=build_inline_kb(url),
-            )
-        else:
+        try:
+            if photo:
+                await message.answer_photo(
+                    photo=photo,  # type: ignore[arg-type]
+                    caption=START_CAPTION,
+                    reply_markup=build_inline_kb(url),
+                )
+            else:
+                await message.answer(
+                    START_CAPTION,
+                    reply_markup=build_inline_kb(url),
+                )
+        except Exception as exc:  # noqa: BLE001 — кнопки должны появиться даже без фото
+            print(f"[start] Не удалось отправить фото: {exc}", flush=True)
             await message.answer(
-                START_CAPTION,
+                START_CAPTION + "\n\n(фото тимчасово недоступне)",
                 reply_markup=build_inline_kb(url),
             )
-
-        # Реплай-клавиатура отдельным сообщением (у фото — инлайн-кнопка)
-        await message.answer(
-            "Користуйтеся кнопкою нижче, щоб дізнатися більше 👇",
-            reply_markup=build_reply_kb(),
-        )
+        finally:
+            # Реплай-клавиатура отдельным сообщением (у фото — инлайн-кнопка)
+            await message.answer(
+                "Користуйтеся кнопкою нижче, щоб дізнатися більше 👇",
+                reply_markup=build_reply_kb(),
+            )
 
     @dp.message(Command("info"))
     @dp.message(F.text == "Інформація")

@@ -18,6 +18,7 @@ from bot_handlers import register_handlers
 
 HERE = Path(__file__).resolve().parent
 URL_FILE = HERE / "tunnel_url.txt"
+TOKEN_FILE = HERE / "bot_token.txt"  # локально, не коммитится в git
 
 
 def get_webapp_url() -> str:
@@ -25,7 +26,7 @@ def get_webapp_url() -> str:
     if env_url.startswith("https://"):
         return env_url.rstrip("/")
     if URL_FILE.exists():
-        content = URL_FILE.read_text(encoding="utf-8").strip()
+        content = URL_FILE.read_text(encoding="utf-8-sig").strip()
         if content.startswith("https://"):
             return content.rstrip("/")
     return ""
@@ -33,6 +34,16 @@ def get_webapp_url() -> str:
 
 def save_webapp_url(url: str) -> None:
     URL_FILE.write_text(url.strip().rstrip("/") + "\n", encoding="utf-8")
+
+
+def get_token() -> str:
+    """Сначала env (Render), потом локальный bot_token.txt (не в git)."""
+    token = (os.getenv("BOT_TOKEN") or "").strip()
+    if token:
+        return token
+    if TOKEN_FILE.exists():
+        return TOKEN_FILE.read_text(encoding="utf-8-sig").strip()
+    return ""
 
 
 async def main() -> None:
@@ -43,11 +54,13 @@ async def main() -> None:
             except Exception:
                 pass
 
-    token = (os.getenv("BOT_TOKEN") or "").strip()
+    token = get_token()
     if not token:
         raise RuntimeError(
-            "Не задан BOT_TOKEN. Укажите переменную окружения BOT_TOKEN "
-            "(на Render — в Environment сервиса бота, локально — перед запуском)."
+            "Не найден токен бота. Варианты:\n"
+            "  1) задайте переменную окружения BOT_TOKEN;\n"
+            "  2) создайте файл bot_token.txt в папке проекта и впишите туда токен.\n"
+            "Файл bot_token.txt добавлен в .gitignore."
         )
 
     bot = Bot(token=token)

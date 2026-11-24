@@ -21,7 +21,12 @@ python bot.py
 ```
 
 Локально бот возьмёт HTTPS-ссылку из `tunnel_url.txt` (если нет `WEBAPP_URL`).
-Файл `tunnel_url.txt` в `.gitignore`, в репозиторий не попадёт.
+Токен можно задать двумя способами:
+
+1. переменная окружения `BOT_TOKEN`;
+2. файл `bot_token.txt` в папке проекта (уже в `.gitignore`).
+
+Файлы `tunnel_url.txt` и `bot_token.txt` в репозиторий не попадут.
 
 Переменные окружения:
 
@@ -34,10 +39,11 @@ python bot.py
 Пример локально (PowerShell):
 
 ```powershell
-$env:BOT_TOKEN="ваш_токен"
 $env:WEBAPP_URL="https://ваш-домен.lhr.life"
 python bot.py
 ```
+
+…или просто создайте `bot_token.txt` с токеном и запускайте `python bot.py`.
 
 ## Деплой на Render
 
