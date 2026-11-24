@@ -6,8 +6,7 @@
 
 - `app.py` — веб-сервер Mini App и HTML-интерфейс (вкладки `Поиск` / `Акции` снизу).
 - `price_finder.py` — парсеры магазинов, кэш, сортировки, категории акций.
-- `bot.py` — только запуск бота и чтение переменных окружения.
-- `bot_handlers.py` — **все обработчики бота**. Добавляйте новые команды сюда.
+- `bot.py` — запуск бота, чтение переменных окружения и **все обработчики**. Добавляйте новые команды сюда.
 - `assets/start.png` — изображение для `/start`.
 - `render.yaml` — готовый Blueprint для Render (web + worker).
 
@@ -66,7 +65,7 @@ python bot.py
 
 ## Кастомная картинка `/start`
 
-Замените `assets/start.png` или задайте в `bot_handlers.py`:
+Замените `assets/start.png` или задайте в `bot.py`:
 
 ```python
 START_IMAGE_URL = "https://example.com/start.jpg"
