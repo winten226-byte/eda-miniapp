@@ -18,7 +18,6 @@ from bot_handlers import register_handlers
 
 HERE = Path(__file__).resolve().parent
 URL_FILE = HERE / "tunnel_url.txt"
-DEFAULT_BOT_TOKEN = "9283096243:AAE44cCoTSSBKIiXvsFpiSpiQW6yXqrFRyw"
 
 
 def get_webapp_url() -> str:
@@ -44,11 +43,11 @@ async def main() -> None:
             except Exception:
                 pass
 
-    token = (os.getenv("BOT_TOKEN") or DEFAULT_BOT_TOKEN).strip()
+    token = (os.getenv("BOT_TOKEN") or "").strip()
     if not token:
         raise RuntimeError(
             "Не задан BOT_TOKEN. Укажите переменную окружения BOT_TOKEN "
-            "или впишите токен в DEFAULT_BOT_TOKEN в bot.py."
+            "(на Render — в Environment сервиса бота, локально — перед запуском)."
         )
 
     bot = Bot(token=token)

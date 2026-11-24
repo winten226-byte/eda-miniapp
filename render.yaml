@@ -1,0 +1,32 @@
+services:
+  # Mini App + API (веб-сервер)
+  - type: web
+    name: gde-deeshevle-web
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py --no-browser --host 0.0.0.0
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+  # Telegram-бот (фоновый worker)
+  - type: worker
+    name: gde-deeshevle-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: BOT_TOKEN
+        sync: false
+      # Ссылка на веб-сервис подставляется автоматически
+      - key: WEBAPP_URL
+        fromService:
+          name: gde-deeshevle-web
+          type: web
+          property: url
