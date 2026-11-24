@@ -195,6 +195,9 @@ def register_handlers(dp: Dispatcher) -> None:
 
 
 # ---------- Запуск ----------
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 async def main() -> None:
     if sys.platform == "win32":
