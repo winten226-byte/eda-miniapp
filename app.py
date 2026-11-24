@@ -15,9 +15,9 @@ import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
-from price_finder import STORES, find_products
+from price_finder import SALE_CATEGORIES, STORES, find_products, search_sales
 
 HOST = "0.0.0.0"
 PORT = 8000
@@ -91,6 +91,12 @@ def render_card(product: dict) -> str:
 
     old = product.get("old_price")
     old_html = f"<span class='old'>{old:.2f} грн</span>" if old is not None else ""
+    discount = product.get("discount_percent") or 0
+    discount_html = f"<span class='discount'>−{discount:g}%</span>" if discount else ""
+    action_badge = (
+        "<span class='tag tag-action'>акция</span>"
+        if product.get("on_sale") and not discount else ""
+    )
 
     sale = product.get("sale_type", "packed")
     form = product.get("form", "свіжий")
@@ -126,11 +132,12 @@ def render_card(product: dict) -> str:
           <span class="store">{esc(product['store'])}</span>
           <span class="tag {SALE_CLASS.get(sale, 'tag-packed')}">{esc(SALE_LABELS.get(sale, sale))}</span>
           <span class="hint {form_class}">{esc(form_label)}</span>
+          {action_badge}
         </div>
         <div class="name" title="{esc(product['name'])}">{esc(product['name'])}</div>
         <div class="meta">{weight_html}{up_html}</div>
         <div class="bottom">
-          <div class="prices">{price_text(product)}{old_html}</div>
+          <div class="prices">{price_text(product)}{old_html}{discount_html}</div>
           {link}
         </div>
       </div>
@@ -147,6 +154,8 @@ def render_page(
     sort_by: str = "unit",
     searched: bool = False,
     limit: int = 20,
+    active_tab: str = "search",
+    category: str = "dairy",
 ) -> str:
     products = products or []
     errors = errors or []
@@ -170,9 +179,14 @@ def render_page(
         f"<option value='{k}' {sel(k, sort_by)}>{v}</option>"
         for k, v in [
             ("unit", "цена за кг/л"),
-            ("price", "цена за упаковку"),
+            ("price", "от дешёвых к дорогим"),
+            ("discount", "самая большая скидка"),
             ("name", "название"),
         ]
+    )
+    category_options = "".join(
+        f"<option value='{k}' {sel(k, category)}>{esc(label)}</option>"
+        for k, (label, _) in SALE_CATEGORIES.items()
     )
 
     shown = [
@@ -182,6 +196,13 @@ def render_page(
     ]
     if sort_by == "price":
         shown.sort(key=lambda p: (p.get("price") or 0, p.get("unit_price") or 0))
+    elif sort_by == "discount":
+        shown.sort(
+            key=lambda p: (
+                -(p.get("discount_percent") or 0),
+                p.get("price") or 0,
+            )
+        )
     elif sort_by == "name":
         shown.sort(key=lambda p: p.get("name", "").lower())
     else:
@@ -195,11 +216,18 @@ def render_page(
 
     cards = "\n".join(render_card(p) for p in shown)
     if searched and not shown:
-        cards = (
-            "<div class='empty'><div class='empty-ico'>🔎</div>"
-            "<h3>Ничего не нашлось</h3>"
-            "<p>Попробуйте другой запрос или выберите больше магазинов.</p></div>"
-        )
+        if active_tab == "sales":
+            cards = (
+                "<div class='empty'><div class='empty-ico'>🏷️</div>"
+                "<h3>Акций не найдено</h3>"
+                "<p>Попробуйте другую категорию или выберите больше магазинов.</p></div>"
+            )
+        else:
+            cards = (
+                "<div class='empty'><div class='empty-ico'>🔎</div>"
+                "<h3>Ничего не нашлось</h3>"
+                "<p>Попробуйте другой запрос или выберите больше магазинов.</p></div>"
+            )
 
     more_button = ""
     if len(shown) > PAGE_SIZE:
@@ -220,11 +248,77 @@ def render_page(
 
     summary = ""
     if searched:
+        what = "акционных товаров" if active_tab == "sales" else "товаров"
         summary = (
             "<div class='summary'>"
-            f"<b>{len(shown)}</b> товаров · <b>{len(selected_stores)}</b> магазинов"
+            f"<b>{len(shown)}</b> {what} · <b>{len(selected_stores)}</b> магазинов"
             "</div>"
         )
+
+    search_form = f"""
+    <form class="search" id="search-form" method="get" action="/">
+      <input type="hidden" name="tab" value="search">
+      <div class="line">
+        <div class="input-wrap">
+          <span class="ico">🔍</span>
+          <input type="text" name="q" value="{esc(query)}"
+                 placeholder="Например: молоко, огурок, бананы">
+        </div>
+        <select name="sale" title="Тип продажи">{sale_options}</select>
+        <select name="sort" title="Сортировка">{sort_options}</select>
+        <input type="hidden" name="limit" value="{limit}">
+        <button class="submit" id="submit-btn" type="submit">Найти</button>
+      </div>
+      <div class="chips">{store_checks}</div>
+    </form>
+    """
+
+    sales_form = f"""
+    <form class="search" id="sales-form" method="get" action="/">
+      <input type="hidden" name="tab" value="sales">
+      <div class="line">
+        <select name="category" title="Категория">{category_options}</select>
+        <select name="sort" title="Сортировка">{sort_options}</select>
+        <input type="hidden" name="limit" value="{limit}">
+        <button class="submit" id="sales-btn" type="submit">Показать акции</button>
+      </div>
+      <div class="chips">{store_checks}</div>
+    </form>
+    """
+
+    active_form = sales_form if active_tab == "sales" else search_form
+    tip_text = (
+        "<b>Акции:</b> показаны товары со скидкой в выбранных магазинах. "
+        "Настройте категорию и сортировку выше."
+        if active_tab == "sales"
+        else "<b>Как читать:</b> «на развес» — цена за 1 кг, «упаковка» — фасованный товар. "
+        "Сортировка по умолчанию — цена за кг/л."
+    )
+
+    def tab_url(tab: str) -> str:
+        params: dict[str, object] = {
+            "tab": tab,
+            "sort": sort_by,
+            "limit": limit,
+            "stores": selected_stores,
+        }
+        if tab == "search":
+            params["q"] = query
+            params["sale"] = sale_filter
+        else:
+            params["category"] = category
+        return "/?" + urlencode(params, doseq=True)
+
+    tabs_html = f"""
+    <nav class="tabs" aria-label="Разделы">
+      <a class="tab {'active' if active_tab == 'search' else ''}" href="{esc(tab_url('search'))}">
+        <span class="tab-ico">🔍</span><span>Поиск</span>
+      </a>
+      <a class="tab {'active' if active_tab == 'sales' else ''}" href="{esc(tab_url('sales'))}">
+        <span class="tab-ico">🏷️</span><span>Акции</span>
+      </a>
+    </nav>
+    """
 
     return f"""<!doctype html>
 <html lang="ru">
@@ -267,6 +361,7 @@ def render_page(
       var(--bg);
     font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
     font-size: 15px; line-height: 1.45;
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
     transition: background .25s, color .25s;
   }}
   a {{ color: inherit; }}
@@ -362,6 +457,7 @@ def render_page(
   .tag-weight {{ background: rgba(251,191,36,.16); color: #fbbf24; }}
   .tag-piece {{ background: rgba(124,92,255,.18); color: #a78bfa; }}
   .tag-packed {{ background: var(--surface-2); color: var(--muted); }}
+  .tag-action {{ background: rgba(248,113,113,.16); color: #fca5a5; }}
   .hint {{ font-size: 10.5px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }}
   .hint-fresh {{ color: var(--green); border-color: rgba(52,211,153,.3); }}
   .hint-dried {{ color: #f472b6; border-color: rgba(244,114,182,.3); }}
@@ -382,6 +478,10 @@ def render_page(
   .price {{ font-size: 20px; font-weight: 800; }}
   .price small {{ font-size: 11px; font-weight: 600; color: var(--muted); }}
   .old {{ font-size: 12px; color: var(--muted); text-decoration: line-through; }}
+  .discount {{
+    font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 999px;
+    background: rgba(248,113,113,.16); color: #fca5a5;
+  }}
   .go {{
     flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px;
     display: grid; place-items: center; text-decoration: none;
@@ -404,7 +504,25 @@ def render_page(
     background: rgba(248,113,113,.09); border: 1px solid rgba(248,113,113,.25); color: #fca5a5;
   }}
   .alert ul {{ margin: 6px 0 0; padding-left: 18px; }}
-  footer {{ text-align: center; color: var(--muted); font-size: 12px; padding: 28px 16px 36px; }}
+  .tabs {{
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    display: flex; gap: 8px; padding: 8px 18px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: rgba(11,16,32,.92); backdrop-filter: blur(18px);
+  }}
+  body[data-theme="light"] .tabs {{ background: rgba(255,255,255,.94); }}
+  .tab {{
+    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 7px 0; border-radius: 14px; text-decoration: none;
+    color: var(--muted); font-size: 12px; font-weight: 700;
+    border: 1px solid transparent;
+  }}
+  .tab-ico {{ font-size: 19px; line-height: 1; }}
+  .tab.active {{
+    color: #061a14; border-color: transparent;
+    background: linear-gradient(135deg, #6ee7b7, #34d399);
+  }}
+  footer {{ text-align: center; color: var(--muted); font-size: 12px; padding: 24px 16px 20px; }}
   @media (max-width: 640px) {{
     .grid {{ grid-template-columns: 1fr; }}
     select {{ width: 100%; }}
@@ -426,26 +544,10 @@ def render_page(
       <button class="theme" id="theme" type="button" title="Сменить тему">☀️</button>
     </div>
 
-    <form class="search" id="search-form" method="get" action="/">
-      <div class="line">
-        <div class="input-wrap">
-          <span class="ico">🔍</span>
-          <input type="text" name="q" value="{esc(query)}"
-                 placeholder="Например: молоко, огурок, бананы">
-        </div>
-        <select name="sale" title="Тип продажи">{sale_options}</select>
-        <select name="sort" title="Сортировка">{sort_options}</select>
-        <input type="hidden" name="limit" value="{limit}">
-        <button class="submit" id="submit-btn" type="submit">Найти</button>
-      </div>
-      <div class="chips">{store_checks}</div>
-    </form>
+    {active_form}
   </header>
 
-  <div class="tip">
-    <b>Как читать:</b> «на развес» — цена за 1 кг, «упаковка» — фасованный товар.
-    Сортировка по умолчанию — цена за кг/л.
-  </div>
+  <div class="tip">{tip_text}</div>
 
   {summary}
   {errors_html}
@@ -454,6 +556,7 @@ def render_page(
 </div>
 
 <footer>Цены зависят от города и магазина · Telegram Mini App</footer>
+{tabs_html}
 
 <script>
 (function () {{
@@ -485,14 +588,15 @@ def render_page(
     }});
   }});
 
-  var form = document.getElementById('search-form');
-  var submitBtn = document.getElementById('submit-btn');
-  if (form && submitBtn) {{
+  document.querySelectorAll('form.search').forEach(function (form) {{
     form.addEventListener('submit', function () {{
-      submitBtn.textContent = 'Ищем...';
-      submitBtn.disabled = true;
+      var btn = form.querySelector('button[type=submit]');
+      if (btn) {{
+        btn.textContent = 'Ищем...';
+        btn.disabled = true;
+      }}
     }});
-  }}
+  }});
 
   var all = Array.prototype.slice.call(document.querySelectorAll('.card'));
   var shown = {PAGE_SIZE};
@@ -540,8 +644,15 @@ class Handler(BaseHTTPRequestHandler):
 
         params = parse_qs(parsed.query)
         query = (params.get("q") or [""])[0].strip()
+        active_tab = (params.get("tab") or ["search"])[0]
+        if active_tab not in ("search", "sales"):
+            active_tab = "search"
+        category = (params.get("category") or ["dairy"])[0]
+        if category not in SALE_CATEGORIES:
+            category = "dairy"
         sale_filter = (params.get("sale") or ["all"])[0]
-        sort_by = (params.get("sort") or ["unit"])[0]
+        sort_default = "discount" if active_tab == "sales" else "unit"
+        sort_by = (params.get("sort") or [sort_default])[0]
         try:
             limit = int((params.get("limit") or ["20"])[0])
         except ValueError:
@@ -561,12 +672,9 @@ class Handler(BaseHTTPRequestHandler):
 
         products: list[dict] = []
         errors: list[tuple[str, str]] = []
-        searched = bool(query)
-        if searched:
-            found, errors = find_products(query, selected_stores, limit)
-            products = [p.to_dict() for p in found]
-
         if parsed.path == "/api/search":
+            found, errors = find_products(query or "продукт", selected_stores, limit)
+            products = [p.to_dict() for p in found]
             payload = json.dumps(
                 {"query": query, "products": products, "errors": errors},
                 ensure_ascii=False,
@@ -579,6 +687,29 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
+        if parsed.path == "/api/sales":
+            found, errors = search_sales(category, selected_stores, limit)
+            payload = json.dumps(
+                {"category": category, "products": [p.to_dict() for p in found],
+                 "errors": errors},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        searched = active_tab == "sales" or bool(query)
+        if searched:
+            if active_tab == "sales":
+                found, errors = search_sales(category, selected_stores, limit)
+            else:
+                found, errors = find_products(query, selected_stores, limit)
+            products = [p.to_dict() for p in found]
+
         html = render_page(
             query=query,
             products=products,
@@ -588,6 +719,8 @@ class Handler(BaseHTTPRequestHandler):
             sort_by=sort_by,
             searched=searched,
             limit=limit,
+            active_tab=active_tab,
+            category=category,
         )
         body = html.encode("utf-8")
         self.send_response(200)

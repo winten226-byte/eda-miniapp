@@ -9,16 +9,18 @@ import argparse
 import json
 import re
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import requests
 from bs4 import BeautifulSoup
 
-TIMEOUT = 30
+TIMEOUT = 15
+CACHE_TTL = 300  # 5 минут: повторные запросы не дёргают сайты магазинов
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -27,6 +29,33 @@ HEADERS = {
     "User-Agent": UA,
     "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
 }
+
+_LOCAL = threading.local()
+_CACHE: dict[tuple, tuple[float, Any]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _session() -> requests.Session:
+    """Одна сессия на поток — переиспользование TCP-соединений ускоряет поиск."""
+    session = getattr(_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        _LOCAL.session = session
+    return session
+
+
+def _cached(key: tuple, producer: Callable[[], Any]) -> Any:
+    now = time.time()
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+        if hit and now - hit[0] < CACHE_TTL:
+            return hit[1]
+    value = producer()
+    with _CACHE_LOCK:
+        _CACHE[key] = (now, value)
+    return value
+
 
 ATB_MS_ID, ATB_MS_KEY = "11280", "8a3d26adf4277edad53bff5b966f445c"
 VARUS_MS_ID, VARUS_MS_KEY = "12138", "468671b168b5ec56b8c34d458bf03f1b"
@@ -49,6 +78,7 @@ class Product:
     sale_type: str = "packed"
     form: str = "свіжий"
     image: str = ""
+    on_sale: bool = False
 
     @property
     def unit_price(self) -> tuple[Optional[float], str]:
@@ -60,11 +90,19 @@ class Product:
             return self.price / self.amount_kg, "грн/кг"
         return None, ""
 
+    @property
+    def discount_percent(self) -> float:
+        if not self.old_price or self.old_price <= self.price:
+            return 0.0
+        return round((self.old_price - self.price) / self.old_price * 100, 1)
+
     def to_dict(self) -> dict:
         data = asdict(self)
         up, label = self.unit_price
         data["unit_price"] = round(up, 2) if up is not None else None
         data["unit_label"] = label
+        data["discount_percent"] = self.discount_percent
+        data["on_sale"] = bool(self.on_sale or self.discount_percent)
         return data
 
 
@@ -74,13 +112,16 @@ def _request(method: str, url: str, **kwargs) -> requests.Response:
     last_error: Optional[Exception] = None
     for attempt in range(2):
         try:
-            resp = requests.request(method, url, **kwargs)
+            resp = _session().request(method, url, **kwargs)
             resp.raise_for_status()
             return resp
         except requests.RequestException as exc:
             last_error = exc
-            if attempt == 0:
-                time.sleep(0.7)
+            # HTTP-ошибки (4xx) повторять бессмысленно — только сетевые сбои
+            if attempt == 0 and not isinstance(exc, requests.HTTPError):
+                time.sleep(0.25)
+            elif isinstance(exc, requests.HTTPError):
+                break
     raise last_error  # type: ignore[misc]
 
 
@@ -207,6 +248,7 @@ def make_product(
     display_price=None,
     form: Optional[str] = None,
     image: str = "",
+    on_sale: bool = False,
 ) -> Optional[Product]:
     try:
         price_f = float(price)
@@ -257,6 +299,7 @@ def make_product(
         sale_type=sale_type,
         form=form or detect_form(clean_name),
         image=str(image or "").strip(),
+        on_sale=bool(on_sale or old_f is not None),
     )
 
 
@@ -284,10 +327,29 @@ def search_silpo(query: str, limit: int) -> list[Product]:
             explicit_weighted=weighted,
             display_price=display_price,
             image=f"{SILPO_IMG_BASE}{item.get('icon', '')}" if item.get("icon") else "",
+            on_sale=bool(
+                item.get("oldPrice")
+                or any(
+                    isinstance(p, dict) and p.get("type") == "promo"
+                    for p in (item.get("promotions") or [])
+                )
+            ),
         )
         if product:
             products.append(product)
     return products
+
+
+def _flatten_atb_items(raw) -> list[dict]:
+    """АТБ иногда отдаёт товары списками списков (алкоголь, пиво и т.п.)."""
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        flat: list[dict] = []
+        for item in raw:
+            flat.extend(_flatten_atb_items(item))
+        return flat
+    return []
 
 
 def search_atb(query: str, limit: int) -> list[Product]:
@@ -317,11 +379,15 @@ def search_atb(query: str, limit: int) -> list[Product]:
         return []
 
     products: list[Product] = []
-    for group in results.get("item_groups", []):
-        for item in group.get("items", []):
+    for group in results.get("item_groups") or []:
+        if not isinstance(group, dict):
+            continue
+        for item in _flatten_atb_items(group.get("items", [])):
             if item.get("is_presence") is False:
                 continue
-            params_data = item.get("params_data") or {}
+            params_data = item.get("params_data")
+            if not isinstance(params_data, dict):
+                params_data = {}
             raw_weighted = params_data.get("Ваговий") or params_data.get("Весовой")
             explicit_weighted: Optional[bool] = None
             if isinstance(raw_weighted, str):
@@ -337,6 +403,7 @@ def search_atb(query: str, limit: int) -> list[Product]:
                 price_unit="кг" if explicit_weighted else "шт",
                 explicit_weighted=explicit_weighted,
                 image=item.get("picture") or "",
+                on_sale=bool(item.get("oldprice")),
             )
             if product:
                 products.append(product)
@@ -369,7 +436,7 @@ def search_varus(query: str, limit: int) -> list[Product]:
         return []
 
     ids: list[str] = []
-    for raw_id in results.get("ids", []):
+    for raw_id in results.get("ids") or []:
         product_id = str(raw_id).split("_")[0]
         if product_id.isdigit() and product_id not in ids:
             ids.append(product_id)
@@ -502,27 +569,71 @@ def search_thrash(query: str, limit: int) -> list[Product]:
     return products
 
 
+def _velmart_meta(ids: list[Any]) -> dict[str, dict]:
+    """Картинки Велмарта есть только в WP REST (acf.external_image_url)."""
+    clean_ids = [str(i) for i in ids if i]
+    if not clean_ids:
+        return {}
+
+    def load() -> dict[str, dict]:
+        try:
+            resp = get(
+                "https://velmart.ua/wp-json/wp/v2/product",
+                params={
+                    "include": ",".join(clean_ids),
+                    "per_page": len(clean_ids),
+                    "_fields": "id,acf",
+                },
+                headers={"Accept": "application/json"},
+                timeout=8,
+            )
+            data = resp.json()
+            if not isinstance(data, list):
+                return {}
+            return {
+                str(row.get("id")): row.get("acf") or {}
+                for row in data
+                if isinstance(row, dict)
+            }
+        except Exception:  # noqa: BLE001 — без картинки товар всё равно покажем
+            return {}
+
+    return _cached(("velmart_meta", tuple(clean_ids)), load)
+
+
 def search_velmart(query: str, limit: int) -> list[Product]:
     resp = get(
         "https://velmart.ua/wp-json/wc/store/products",
         params={"search": query, "per_page": min(max(limit, 1), 100)},
     )
+    raw_items = resp.json()
+    if not isinstance(raw_items, list):
+        return []
+
+    meta = _velmart_meta([item.get("id") for item in raw_items if isinstance(item, dict)])
     products: list[Product] = []
-    for item in resp.json():
-        if item.get("is_in_stock") is False:
+    for item in raw_items:
+        if not isinstance(item, dict) or item.get("is_in_stock") is False:
             continue
         prices = item.get("prices") or {}
         if not prices.get("price"):
             continue
         divisor = 10 ** int(prices.get("currency_minor_unit", 2))
+        acf = meta.get(str(item.get("id"))) or {}
+        images = item.get("images") or []
+        image = acf.get("external_image_url") or ""
+        if not image and isinstance(images, list) and images and isinstance(images[0], dict):
+            image = images[0].get("src") or ""
+
         product = make_product(
             "Велмарт",
             item.get("name", ""),
-            int(prices["price"]) / divisor,
+            float(prices["price"]) / divisor,
             item.get("permalink", ""),
             item.get("name", ""),
-            int(prices["regular_price"]) / divisor if prices.get("regular_price") else None,
-            image=(item.get("images") or [{}])[0].get("src", "") if item.get("images") else "",
+            float(prices["regular_price"]) / divisor if prices.get("regular_price") else None,
+            image=image,
+            on_sale=bool(item.get("on_sale") or acf.get("promo_start") or acf.get("promo_end")),
         )
         if product:
             products.append(product)
@@ -620,9 +731,15 @@ def find_products(
     all_products: list[Product] = []
     errors: list[tuple[str, str]] = []
 
+    def load_store(key: str) -> list[Product]:
+        return _cached(
+            ("store", key, query, limit),
+            lambda: STORES[key][1](query, limit),
+        )
+
     with ThreadPoolExecutor(max_workers=max(1, len(store_keys))) as executor:
         futures = {
-            executor.submit(STORES[key][1], query, limit): key
+            executor.submit(load_store, key): key
             for key in store_keys
         }
         for future in as_completed(futures):
@@ -669,6 +786,34 @@ def find_products(
         )
     )
     return filtered, errors
+
+
+SALE_CATEGORIES: dict[str, tuple[str, str]] = {
+    "all": ("Всі товари", "продукт"),
+    "dairy": ("Молочні продукти", "молоко"),
+    "meat": ("М'ясо та птиця", "м'ясо"),
+    "bakery": ("Хліб та випічка", "хліб"),
+    "fruits": ("Фрукти", "яблука"),
+    "vegetables": ("Овочі", "помідори"),
+    "drinks": ("Напої", "сік"),
+    "sweets": ("Солодке", "цукерки"),
+    "alcohol": ("Алкоголь", "алкоголь"),
+}
+
+
+def search_sales(
+    category: str,
+    store_keys: Optional[list[str]] = None,
+    limit: int = 20,
+) -> tuple[list[Product], list[tuple[str, str]]]:
+    """Товары по акции в выбранной категории."""
+    _, query = SALE_CATEGORIES.get(category, SALE_CATEGORIES["all"])
+    products, errors = find_products(
+        query or "продукт", store_keys, limit, filter_mode="all"
+    )
+    sales = [p for p in products if p.on_sale or p.old_price]
+    sales.sort(key=lambda p: (-p.discount_percent, p.price))
+    return sales, errors
 
 
 if __name__ == "__main__":
