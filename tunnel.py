@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Запуск сервера Mini App + публичная HTTPS-ссылка через localhost.run.
+Запуск сервера Mini App + публічне HTTPS-посилання через localhost.run.
 
 Запуск:
     python tunnel.py
@@ -38,13 +38,13 @@ def main() -> None:
 
     ssh = shutil.which("ssh")
     if not ssh:
-        print("Не найден ssh. Установите OpenSSH Client.", flush=True)
+        print("Не знайдено ssh. Встановіть OpenSSH Client.", flush=True)
         sys.exit(1)
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), app.Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"Локальный сервер: http://localhost:{args.port}", flush=True)
-    print("Подключаем публичный туннель localhost.run...", flush=True)
+    print(f"Локальний сервер: http://localhost:{args.port}", flush=True)
+    print("Підключаємо публічний тунель localhost.run...", flush=True)
 
     known_hosts = os.path.join(HERE, ".ssh_known_hosts")
     cmd = [
@@ -84,18 +84,18 @@ def main() -> None:
                 url = match.group(0)
                 announced = True
                 print("\n" + "=" * 74, flush=True)
-                print(f"ПУБЛИЧНАЯ HTTPS-ССЫЛКА: {url}", flush=True)
+                print(f"ПУБЛІЧНЕ HTTPS-ПОСИЛАННЯ: {url}", flush=True)
                 print("=" * 74 + "\n", flush=True)
                 try:
                     with open(url_file, "w", encoding="utf-8") as fh:
                         fh.write(url + "\n")
-                    print(f"Ссылка сохранена в {url_file}", flush=True)
+                    print(f"Посилання збережено у {url_file}", flush=True)
                 except OSError:
                     pass
             else:
                 print(line, flush=True)
     except KeyboardInterrupt:
-        print("\nОстановлено.", flush=True)
+        print("\nЗупинено.", flush=True)
     finally:
         if proc.poll() is None:
             proc.terminate()

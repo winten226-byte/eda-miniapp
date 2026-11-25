@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Веб-сервер и интерфейс Telegram Mini App для поиска самых дешёвых продуктов.
+Веб-сервер та інтерфейс Telegram Mini App для пошуку найвигідніших продуктів.
 
 Запуск:
     python app.py
@@ -26,17 +26,17 @@ PAGE_SIZE = 12
 STORE_LABELS = {key: value[0] for key, value in STORES.items()}
 
 FORM_HINTS = {
-    "свіжий": ("свежий", "hint-fresh"),
-    "солений": ("солёный", "hint-salted"),
-    "маринований": ("маринованный", "hint-marinated"),
-    "консервований": ("консервы", "hint-other"),
-    "квашений": ("квашеный", "hint-other"),
-    "сушений": ("сушёный", "hint-dried"),
-    "швидкозаморожений": ("замороженный", "hint-other"),
+    "свіжий": ("свіжий", "hint-fresh"),
+    "солений": ("солений", "hint-salted"),
+    "маринований": ("маринований", "hint-marinated"),
+    "консервований": ("консерви", "hint-other"),
+    "квашений": ("квашений", "hint-other"),
+    "сушений": ("сушений", "hint-dried"),
+    "швидкозаморожений": ("заморожений", "hint-other"),
 }
 
 SALE_LABELS = {
-    "weighted": "на развес",
+    "weighted": "на вагу",
     "piece": "штучно",
     "packed": "упаковка",
 }
@@ -87,14 +87,14 @@ def render_card(product: dict) -> str:
             "</span>"
         )
     else:
-        up_html = "<span class='unit unit-muted'>цена за кг не указана</span>"
+        up_html = "<span class='unit unit-muted'>ціна за кг не вказана</span>"
 
     old = product.get("old_price")
     old_html = f"<span class='old'>{old:.2f} грн</span>" if old is not None else ""
     discount = product.get("discount_percent") or 0
     discount_html = f"<span class='discount'>−{discount:g}%</span>" if discount else ""
     action_badge = (
-        "<span class='tag tag-action'>акция</span>"
+        "<span class='tag tag-action'>акція</span>"
         if product.get("on_sale") and not discount else ""
     )
 
@@ -119,10 +119,10 @@ def render_card(product: dict) -> str:
     if url:
         link = (
             f"<a class='go' data-ext-url='{esc(url)}' href='{esc(url)}' "
-            "target='_blank' rel='noopener noreferrer' title='Открыть товар в магазине'>↗</a>"
+            "target='_blank' rel='noopener noreferrer' title='Відкрити товар у магазині'>↗</a>"
         )
     else:
-        link = "<span class='go go-muted' title='Ссылки нет'>↗</span>"
+        link = "<span class='go go-muted' title='Посилання немає'>↗</span>"
 
     return f"""
     <article class="card">
@@ -173,15 +173,15 @@ def render_page(
 
     sale_options = "".join(
         f"<option value='{k}' {sel(k, sale_filter)}>{esc(v)}</option>"
-        for k, v in [("all", "все"), *SALE_LABELS.items()]
+        for k, v in [("all", "усі"), *SALE_LABELS.items()]
     )
     sort_options = "".join(
         f"<option value='{k}' {sel(k, sort_by)}>{v}</option>"
         for k, v in [
-            ("unit", "цена за кг/л"),
-            ("price", "от дешёвых к дорогим"),
-            ("discount", "самая большая скидка"),
-            ("name", "название"),
+            ("unit", "ціна за кг/л"),
+            ("price", "від найнижчої ціни до найвищої"),
+            ("discount", "найбільша знижка"),
+            ("name", "назва"),
         ]
     )
     category_options = "".join(
@@ -219,20 +219,20 @@ def render_page(
         if active_tab == "sales":
             cards = (
                 "<div class='empty'><div class='empty-ico'>🏷️</div>"
-                "<h3>Акций не найдено</h3>"
-                "<p>Попробуйте другую категорию или выберите больше магазинов.</p></div>"
+                "<h3>Акцій не знайдено</h3>"
+                "<p>Спробуйте іншу категорію або виберіть більше магазинів.</p></div>"
             )
         else:
             cards = (
                 "<div class='empty'><div class='empty-ico'>🔎</div>"
-                "<h3>Ничего не нашлось</h3>"
-                "<p>Попробуйте другой запрос или выберите больше магазинов.</p></div>"
+                "<h3>Нічого не знайшлося</h3>"
+                "<p>Спробуйте інший запит або виберіть більше магазинів.</p></div>"
             )
 
     more_button = ""
     if len(shown) > PAGE_SIZE:
         more_button = (
-            f"<button class='more' id='more' type='button'>Показать ещё "
+            f"<button class='more' id='more' type='button'>Показати ще "
             f"({len(shown) - PAGE_SIZE})</button>"
         )
 
@@ -242,16 +242,16 @@ def render_page(
             f"<li><b>{esc(store)}</b>: {esc(msg)}</li>" for store, msg in errors
         )
         errors_html = (
-            "<div class='alert'><b>Не удалось получить данные:</b>"
+            "<div class='alert'><b>Не вдалося отримати дані:</b>"
             f"<ul>{items}</ul></div>"
         )
 
     summary = ""
     if searched:
-        what = "акционных товаров" if active_tab == "sales" else "товаров"
+        what = "акційних товарів" if active_tab == "sales" else "товарів"
         summary = (
             "<div class='summary'>"
-            f"<b>{len(shown)}</b> {what} · <b>{len(selected_stores)}</b> магазинов"
+            f"<b>{len(shown)}</b> {what} · <b>{len(selected_stores)}</b> магазинів"
             "</div>"
         )
 
@@ -262,12 +262,12 @@ def render_page(
         <div class="input-wrap">
           <span class="ico">🔍</span>
           <input type="text" name="q" value="{esc(query)}"
-                 placeholder="Например: молоко, огурок, бананы">
+                 placeholder="Наприклад: молоко, огірок, банани">
         </div>
-        <select name="sale" title="Тип продажи">{sale_options}</select>
-        <select name="sort" title="Сортировка">{sort_options}</select>
+        <select name="sale" title="Тип продажу">{sale_options}</select>
+        <select name="sort" title="Сортування">{sort_options}</select>
         <input type="hidden" name="limit" value="{limit}">
-        <button class="submit" id="submit-btn" type="submit">Найти</button>
+        <button class="submit" id="submit-btn" type="submit">Знайти</button>
       </div>
       <div class="chips">{store_checks}</div>
     </form>
@@ -277,25 +277,58 @@ def render_page(
     <form class="search" id="sales-form" method="get" action="/">
       <input type="hidden" name="tab" value="sales">
       <div class="line">
-        <select name="category" title="Категория">{category_options}</select>
-        <select name="sort" title="Сортировка">{sort_options}</select>
+        <select name="category" title="Категорія">{category_options}</select>
+        <select name="sort" title="Сортування">{sort_options}</select>
         <input type="hidden" name="limit" value="{limit}">
-        <button class="submit" id="sales-btn" type="submit">Показать акции</button>
+        <button class="submit" id="sales-btn" type="submit">Показати акції</button>
       </div>
       <div class="chips">{store_checks}</div>
     </form>
     """
 
-    active_form = sales_form if active_tab == "sales" else search_form
-    tip_text = (
-        "<b>Акции:</b> показаны товары со скидкой в выбранных магазинах. "
-        "Настройте категорию и сортировку выше."
-        if active_tab == "sales"
-        else "<b>Как читать:</b> «на развес» — цена за 1 кг, «упаковка» — фасованный товар. "
-        "Сортировка по умолчанию — цена за кг/л."
-    )
+    feedback_form = """
+    <form class="search feedback" id="feedback-form">
+      <div class="line">
+        <select id="feedback-category" name="category" title="Тип повідомлення">
+          <option value="idea">💡 Ідея</option>
+          <option value="bug">🐛 Несправність</option>
+          <option value="other">✍️ Інше</option>
+        </select>
+        <button class="submit" id="feedback-btn" type="submit">Надіслати</button>
+      </div>
+      <textarea id="feedback-text" name="text" rows="4" maxlength="2000"
+                placeholder="Напишіть ідею або опишіть, що працює неправильно..."></textarea>
+      <div class="form-status" id="feedback-status" role="status"></div>
+      <p class="form-note">Повідомлення надійде адміністратору через бота.</p>
+    </form>
+    """
+
+    if active_tab == "feedback":
+        active_form = feedback_form
+    elif active_tab == "sales":
+        active_form = sales_form
+    else:
+        active_form = search_form
+
+    if active_tab == "feedback":
+        tip_text = (
+            "<b>Маєте пропозицію?</b> Розкажіть про ідею або повідомте про помилку — "
+            "ми обов'язково розглянемо ваш відгук."
+        )
+    elif active_tab == "sales":
+        tip_text = (
+            "<b>Акції:</b> показано товари зі знижкою у вибраних магазинах. "
+            "Налаштуйте категорію та сортування вище."
+        )
+    else:
+        tip_text = (
+            "<b>Як читати:</b> «на вагу» — ціна за 1 кг, «упаковка» — фасований товар. "
+            "Типове сортування — ціна за кг/л."
+        )
 
     def tab_url(tab: str) -> str:
+        if tab == "feedback":
+            return "/?tab=feedback"
         params: dict[str, object] = {
             "tab": tab,
             "sort": sort_by,
@@ -310,23 +343,26 @@ def render_page(
         return "/?" + urlencode(params, doseq=True)
 
     tabs_html = f"""
-    <nav class="tabs" aria-label="Разделы">
+    <nav class="tabs" aria-label="Розділи">
       <a class="tab {'active' if active_tab == 'search' else ''}" href="{esc(tab_url('search'))}">
-        <span class="tab-ico">🔍</span><span>Поиск</span>
+        <span class="tab-ico">🔍</span><span>Пошук</span>
       </a>
       <a class="tab {'active' if active_tab == 'sales' else ''}" href="{esc(tab_url('sales'))}">
-        <span class="tab-ico">🏷️</span><span>Акции</span>
+        <span class="tab-ico">🏷️</span><span>Акції</span>
+      </a>
+      <a class="tab {'active' if active_tab == 'feedback' else ''}" href="{esc(tab_url('feedback'))}">
+        <span class="tab-ico">💬</span><span>Відгук</span>
       </a>
     </nav>
     """
 
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="uk">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="color-scheme" content="dark light">
-<title>Где дешевле — Mini App</title>
+<title>Де дешевше — Mini App</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {{
@@ -425,6 +461,16 @@ def render_page(
     color: var(--muted); font-size: 12.5px;
   }}
   .tip b {{ color: var(--text); }}
+  textarea {{
+    width: 100%; margin-top: 10px; padding: 13px 14px; border-radius: 13px;
+    border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text); font: inherit; font-size: 15px; resize: vertical;
+    outline: none; min-height: 96px;
+  }}
+  textarea:focus {{ border-color: var(--green); box-shadow: 0 0 0 3px rgba(52,211,153,.16); }}
+  textarea::placeholder {{ color: var(--muted); }}
+  .form-status {{ margin-top: 8px; min-height: 18px; font-size: 13px; color: var(--green); }}
+  .form-note {{ margin: 2px 0 0; color: var(--muted); font-size: 12px; }}
   .summary {{ margin: 4px 2px 12px; color: var(--muted); font-size: 13px; }}
   .summary b {{ color: var(--green); }}
   .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }}
@@ -537,11 +583,11 @@ def render_page(
       <div class="brand">
         <div class="logo">🛒</div>
         <div>
-          <h1>Где дешевле?</h1>
+          <h1>Де дешевше?</h1>
           <p class="sub">Сільпо · АТБ · Варус · Новус · Траш · Велмарт</p>
         </div>
       </div>
-      <button class="theme" id="theme" type="button" title="Сменить тему">☀️</button>
+      <button class="theme" id="theme" type="button" title="Змінити тему">☀️</button>
     </div>
 
     {active_form}
@@ -555,7 +601,7 @@ def render_page(
   {more_button}
 </div>
 
-<footer>Цены зависят от города и магазина · Telegram Mini App</footer>
+<footer>Ціни залежать від міста та магазину · Telegram Mini App</footer>
 {tabs_html}
 
 <script>
@@ -588,15 +634,45 @@ def render_page(
     }});
   }});
 
-  document.querySelectorAll('form.search').forEach(function (form) {{
+  document.querySelectorAll('form.search:not(#feedback-form)').forEach(function (form) {{
     form.addEventListener('submit', function () {{
       var btn = form.querySelector('button[type=submit]');
       if (btn) {{
-        btn.textContent = 'Ищем...';
+        btn.textContent = 'Шукаємо...';
         btn.disabled = true;
       }}
     }});
   }});
+
+  var feedbackForm = document.getElementById('feedback-form');
+  if (feedbackForm) {{
+    feedbackForm.addEventListener('submit', function (e) {{
+      e.preventDefault();
+      var text = document.getElementById('feedback-text').value.trim();
+      var category = document.getElementById('feedback-category').value;
+      var status = document.getElementById('feedback-status');
+      var btn = document.getElementById('feedback-btn');
+      if (text.length < 3) {{
+        status.textContent = 'Напишіть хоча б кілька символів.';
+        return;
+      }}
+      if (!tg || typeof tg.sendData !== 'function') {{
+        status.textContent = 'Відкрийте Mini App через бота, щоб надіслати відгук.';
+        return;
+      }}
+      try {{
+        tg.sendData(JSON.stringify({{
+          type: 'feedback',
+          category: category,
+          text: text.slice(0, 2000)
+        }}));
+        status.textContent = 'Надсилаємо...';
+        if (btn) btn.disabled = true;
+      }} catch (err) {{
+        status.textContent = 'Не вдалося надіслати. Спробуйте кнопку «Відгук» у боті.';
+      }}
+    }});
+  }}
 
   var all = Array.prototype.slice.call(document.querySelectorAll('.card'));
   var shown = {PAGE_SIZE};
@@ -645,7 +721,7 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         query = (params.get("q") or [""])[0].strip()
         active_tab = (params.get("tab") or ["search"])[0]
-        if active_tab not in ("search", "sales"):
+        if active_tab not in ("search", "sales", "feedback"):
             active_tab = "search"
         category = (params.get("category") or ["dairy"])[0]
         if category not in SALE_CATEGORIES:
@@ -702,7 +778,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
-        searched = active_tab == "sales" or bool(query)
+        searched = active_tab == "sales" or (active_tab == "search" and bool(query))
         if searched:
             if active_tab == "sales":
                 found, errors = search_sales(category, selected_stores, limit)
@@ -742,7 +818,7 @@ def main() -> None:
             except Exception:
                 pass
 
-    parser = argparse.ArgumentParser(description="Сервер Mini App поиска продуктов")
+    parser = argparse.ArgumentParser(description="Сервер Mini App пошуку продуктів")
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--no-browser", action="store_true")
@@ -754,16 +830,16 @@ def main() -> None:
 
     server = ThreadingHTTPServer((args.host, port), Handler)
     url = f"http://localhost:{port}"
-    print(f"Сервер запущен: {url}", flush=True)
+    print(f"Сервер запущено: {url}", flush=True)
     ip = local_ip()
     if ip and not on_render:
-        print(f"Локальный IP: http://{ip}:{port}", flush=True)
+        print(f"Локальна IP-адреса: http://{ip}:{port}", flush=True)
     if not args.no_browser and not on_render:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nОстановлено.")
+        print("\nЗупинено.")
     finally:
         server.server_close()
 

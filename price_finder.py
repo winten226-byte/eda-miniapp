@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Поиск самых дешёвых продуктов в украинских супермаркетах.
-Магазины: Сільпо, АТБ, Варус, Новус, Траш, Велмарт.
+Пошук найвигідніших продуктів в українських супермаркетах.
+Магазини: Сільпо, АТБ, Варус, Новус, Траш, Велмарт.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import requests
 from bs4 import BeautifulSoup
 
 TIMEOUT = 15
-CACHE_TTL = 300  # 5 минут: повторные запросы не дёргают сайты магазинов
+CACHE_TTL = 300  # 5 хвилин: повторні запити не звертаються до сайтів магазинів
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -36,7 +36,7 @@ _CACHE_LOCK = threading.Lock()
 
 
 def _session() -> requests.Session:
-    """Одна сессия на поток — переиспользование TCP-соединений ускоряет поиск."""
+    """Одна сесія на потік — повторне використання TCP-з'єднань прискорює пошук."""
     session = getattr(_LOCAL, "session", None)
     if session is None:
         session = requests.Session()
@@ -117,7 +117,7 @@ def _request(method: str, url: str, **kwargs) -> requests.Response:
             return resp
         except requests.RequestException as exc:
             last_error = exc
-            # HTTP-ошибки (4xx) повторять бессмысленно — только сетевые сбои
+            # HTTP-помилки (4xx) повторювати марно — лише мережеві збої
             if attempt == 0 and not isinstance(exc, requests.HTTPError):
                 time.sleep(0.25)
             elif isinstance(exc, requests.HTTPError):
@@ -341,7 +341,7 @@ def search_silpo(query: str, limit: int) -> list[Product]:
 
 
 def _flatten_atb_items(raw) -> list[dict]:
-    """АТБ иногда отдаёт товары списками списков (алкоголь, пиво и т.п.)."""
+    """АТБ іноді повертає товари списками списків (алкоголь, пиво тощо)."""
     if isinstance(raw, dict):
         return [raw]
     if isinstance(raw, (list, tuple)):
@@ -570,7 +570,7 @@ def search_thrash(query: str, limit: int) -> list[Product]:
 
 
 def _velmart_meta(ids: list[Any]) -> dict[str, dict]:
-    """Картинки Велмарта есть только в WP REST (acf.external_image_url)."""
+    """Зображення Велмарта є лише у WP REST (acf.external_image_url)."""
     clean_ids = [str(i) for i in ids if i]
     if not clean_ids:
         return {}
@@ -595,7 +595,7 @@ def _velmart_meta(ids: list[Any]) -> dict[str, dict]:
                 for row in data
                 if isinstance(row, dict)
             }
-        except Exception:  # noqa: BLE001 — без картинки товар всё равно покажем
+        except Exception:  # noqa: BLE001 — без зображення товар усе одно покажемо
             return {}
 
     return _cached(("velmart_meta", tuple(clean_ids)), load)
@@ -806,7 +806,7 @@ def search_sales(
     store_keys: Optional[list[str]] = None,
     limit: int = 20,
 ) -> tuple[list[Product], list[tuple[str, str]]]:
-    """Товары по акции в выбранной категории."""
+    """Товари за акцією у вибраній категорії."""
     _, query = SALE_CATEGORIES.get(category, SALE_CATEGORIES["all"])
     products, errors = find_products(
         query or "продукт", store_keys, limit, filter_mode="all"
@@ -817,7 +817,7 @@ def search_sales(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Поиск продуктов в супермаркетах")
+    parser = argparse.ArgumentParser(description="Пошук продуктів у супермаркетах")
     parser.add_argument("query", nargs="+")
     parser.add_argument("--stores", default="all")
     parser.add_argument("--limit", type=int, default=15)
@@ -833,4 +833,4 @@ if __name__ == "__main__":
             up_str = f" ({up:.2f} {lbl})" if up else ""
             print(f"{idx}. [{item.store}] {item.name} — {item.price:.2f} грн{up_str}")
         if errs:
-            print("Ошибки:", errs)
+            print("Помилки:", errs)

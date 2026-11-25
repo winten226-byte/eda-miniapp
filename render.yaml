@@ -11,7 +11,7 @@ services:
       - key: PYTHONUNBUFFERED
         value: "1"
 
-  # Telegram-бот (фоновый worker)
+  # Telegram-бот (фоновий worker)
   - type: worker
     name: gde-deeshevle-bot
     runtime: python
@@ -24,7 +24,10 @@ services:
         value: "1"
       - key: BOT_TOKEN
         sync: false
-      # Ссылка на веб-сервис подставляется автоматически
+      # ID адміністраторів для /stats, /feedbacks і повідомлень про відгуки
+      - key: ADMIN_IDS
+        sync: false
+      # Посилання на веб-сервіс підставляється автоматично
       - key: WEBAPP_URL
         fromService:
           name: gde-deeshevle-web
