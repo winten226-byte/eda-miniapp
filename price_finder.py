@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 import threading
@@ -61,7 +62,20 @@ ATB_MS_ID, ATB_MS_KEY = "11280", "8a3d26adf4277edad53bff5b966f445c"
 VARUS_MS_ID, VARUS_MS_KEY = "12138", "468671b168b5ec56b8c34d458bf03f1b"
 VARUS_SHOP_ID, VARUS_REGION_ID = 1, 1
 SILPO_BRANCH = "1edb6b53-596c-6d06-b5f0-b5ff7ea46636"
+SILPO_BRANCHES_URL = "https://sf-ecom-api.silpo.ua/v1/uk/branches"
 SILPO_IMG_BASE = "https://images.silpo.ua/v2/products/300x300/webp/"
+
+# Центр Києва — використовується, якщо користувач не вказав геолокацію.
+KYIV_CENTER = (50.4501, 30.5234)
+
+# Ендпоінти, через які сайти віддають список магазинів/найближчий магазин.
+ATB_STORES_URL = "https://www.atbmarket.com/site/getstoresgeo"
+ATB_HOME_URL = "https://www.atbmarket.com/"
+VARUS_SHOPS_URL = (
+    "https://varus.ua/api/catalog/vue_storefront_catalog_2/tms_shop/_search"
+)
+NOVUS_SHOPS_URL = "https://novus.ua/api/popup/shops"
+NOVUS_HOME_URL = "https://novus.ua/"
 
 
 @dataclass
@@ -79,6 +93,7 @@ class Product:
     form: str = "свіжий"
     image: str = ""
     on_sale: bool = False
+    sale_channel: str = "онлайн"
 
     @property
     def unit_price(self) -> tuple[Optional[float], str]:
@@ -131,6 +146,402 @@ def get(url: str, **kwargs) -> requests.Response:
 
 def post(url: str, **kwargs) -> requests.Response:
     return _request("POST", url, **kwargs)
+
+
+def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Відстань між координатами у кілометрах (гаверсинус)."""
+    radius = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * radius * math.asin(math.sqrt(a))
+
+
+def get_silpo_branches() -> list[dict]:
+    """Список відділень Сільпо з координатами (кешується на CACHE_TTL)."""
+
+    def load() -> list[dict]:
+        resp = get(
+            SILPO_BRANCHES_URL,
+            headers={**HEADERS, "Accept": "application/json"},
+        )
+        rows = resp.json().get("items", [])
+        branches: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("branchId"):
+                continue
+            try:
+                lat = float(row["latitude"])
+                lon = float(row["longitude"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            branches.append(
+                {
+                    "branch_id": str(row["branchId"]),
+                    "city": str(row.get("cityFull") or ""),
+                    "address": str(row.get("addressFull") or ""),
+                    "latitude": lat,
+                    "longitude": lon,
+                    # У частини відділень немає онлайн-каталогу (порожні /products).
+                    # hasPickup — ознака того, що каталог цього відділення є.
+                    "has_pickup": bool(row.get("hasPickup")),
+                }
+            )
+        return branches
+
+    return _cached(("silpo_branches",), load)
+
+
+def nearest_silpo_branches(lat: float, lon: float, count: int = 3) -> list[dict]:
+    """Кілька найближчих відділень Сільпо, відсортованих за відстанню."""
+    branches = get_silpo_branches()
+    if not branches:
+        return []
+    # Відділення без hasPickup часто мають порожній каталог товарів.
+    candidates = [item for item in branches if item.get("has_pickup")] or branches
+    nearest = sorted(
+        candidates,
+        key=lambda item: distance_km(lat, lon, item["latitude"], item["longitude"]),
+    )[: max(1, count)]
+    result: list[dict] = []
+    for branch in nearest:
+        item = dict(branch)
+        item["distance_km"] = round(
+            distance_km(lat, lon, branch["latitude"], branch["longitude"]), 1
+        )
+        result.append(item)
+    return result
+
+
+def nearest_silpo_branch(lat: float, lon: float) -> dict | None:
+    """Найближче до точки відділення Сільпо (сумісний варіант)."""
+    branches = nearest_silpo_branches(lat, lon, 1)
+    return branches[0] if branches else None
+
+
+def find_silpo_branch_by_address(text: str) -> dict | None:
+    """Грубий пошук відділення за введеним текстом адреси/району."""
+    words = [w for w in re.findall(r"[^\W\d_]+", str(text).lower(), re.UNICODE) if len(w) >= 3]
+    if not words:
+        return None
+    branches = get_silpo_branches()
+    candidates = [item for item in branches if item.get("has_pickup")] or branches
+    best: tuple[int, dict] | None = None
+    for branch in candidates:
+        haystack = f"{branch['city']} {branch['address']}".lower()
+        score = sum(1 for word in words if word in haystack)
+        if score and (best is None or score > best[0]):
+            best = (score, branch)
+    return best[1] if best else None
+
+
+def _nearest_item(items: list[dict], lat: float, lon: float) -> dict | None:
+    """Один найближчий магазин зі списку координат."""
+    if not items:
+        return None
+    nearest = min(items, key=lambda item: distance_km(lat, lon, item["latitude"], item["longitude"]))
+    result = dict(nearest)
+    result["distance_km"] = round(
+        distance_km(lat, lon, nearest["latitude"], nearest["longitude"]), 1
+    )
+    return result
+
+
+def get_atb_cities() -> list[dict]:
+    """Міста АТБ з координатами — потрібні, щоб вибрати cityid за гео."""
+
+    def load() -> list[dict]:
+        resp = get(ATB_HOME_URL)
+        cities: list[dict] = []
+        for option in re.findall(r"<option\b[^>]*>", resp.text):
+            city_id = re.search(r'data-cityid="(\d+)"', option)
+            coord = re.search(r'data-coord="([^"]+)"', option)
+            if not (city_id and coord):
+                continue
+            nums = re.findall(r"-?\d+(?:\.\d+)?", coord.group(1))
+            if len(nums) < 2:
+                continue
+            try:
+                lat, lon = float(nums[0]), float(nums[1])
+            except ValueError:
+                continue
+            cities.append({"id": city_id.group(1), "latitude": lat, "longitude": lon})
+        return cities
+
+    return _cached(("atb_cities",), load)
+
+
+def get_atb_nearby_stores(lat: float, lon: float, count: int = 1) -> list[dict]:
+    """Магазини АТБ поблизу точки: id магазина саме той, що треба в location."""
+
+    def load() -> list[dict]:
+        cities = get_atb_cities()
+        # На межі міст найближче за координатами місто може повернути порожній
+        # список, тому пробуємо кілька найближчих cityid по черзі.
+        candidates = sorted(
+            cities,
+            key=lambda city: distance_km(lat, lon, city["latitude"], city["longitude"]),
+        )
+        # Бот орієнтований на Київ: спершу пробуємо саме його cityid.
+        if distance_km(lat, lon, *KYIV_CENTER) <= 60:
+            candidates.sort(key=lambda city: city["id"] != "395")
+        candidates = candidates[:5] or [{"id": "395"}]
+        headers = {
+            **HEADERS,
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": ATB_HOME_URL,
+        }
+        for city in candidates:
+            try:
+                resp = post(
+                    ATB_STORES_URL,
+                    data={
+                        "geoloc": f"{lat},{lon}",
+                        "cityid": city["id"],
+                        "delivery": "1",
+                        "delivery_service": "ipost",
+                    },
+                    headers=headers,
+                )
+                payload = resp.json()
+            except Exception as exc:  # noqa: BLE001 — пробуємо наступне місто
+                print(f"[atb] cityid {city['id']}: {exc}", flush=True)
+                continue
+            if str(payload.get("res")) not in {"1", "True"} or not payload.get("coordinates"):
+                continue
+            addresses = {
+                option.get("value", ""): option.get_text(" ", strip=True)
+                for option in BeautifulSoup(
+                    payload.get("optselect") or "", "html.parser"
+                ).find_all("option")
+            }
+            stores: list[dict] = []
+            for row in payload["coordinates"]:
+                store_id = str(row.get("id") or "").strip()
+                try:
+                    store_lat, store_lon = float(row["lat"]), float(row["lng"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not store_id:
+                    continue
+                try:
+                    distance = round(float(row.get("dist")) / 1000, 1)
+                except (TypeError, ValueError):
+                    distance = round(distance_km(lat, lon, store_lat, store_lon), 1)
+                stores.append(
+                    {
+                        "id": store_id,
+                        "address": addresses.get(store_id, ""),
+                        "latitude": store_lat,
+                        "longitude": store_lon,
+                        "distance_km": distance,
+                    }
+                )
+            if stores:
+                stores.sort(key=lambda item: item["distance_km"])
+                return stores[: max(1, count)]
+        return []
+
+    return _cached(("atb_nearby", round(lat, 2), round(lon, 2), count), load)
+
+
+def get_varus_shops() -> list[dict]:
+    """Список магазинів Варуса з Elasticsearch сайту (кешується)."""
+
+    def load() -> list[dict]:
+        resp = post(
+            VARUS_SHOPS_URL,
+            json={"size": 250, "query": {"match_all": {}}},
+            headers={
+                **HEADERS,
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "Origin": "https://varus.ua",
+                "Referer": "https://varus.ua/",
+            },
+        )
+        hits = (resp.json().get("hits") or {}).get("hits") or []
+        shops: list[dict] = []
+        for hit in hits:
+            source = hit.get("_source") or {}
+            if str(source.get("status")) in {"0", "False"}:
+                continue
+            if source.get("is_enabled") is False or source.get("upload_to_web") is False:
+                continue
+            shop_id = str(source.get("id") or hit.get("_id") or "").strip()
+            try:
+                shop_lat, shop_lon = float(source["lat"]), float(source["long"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not shop_id:
+                continue
+            shops.append(
+                {
+                    "id": shop_id,
+                    "name": str(source.get("name") or ""),
+                    "address": str(source.get("address") or ""),
+                    "latitude": shop_lat,
+                    "longitude": shop_lon,
+                }
+            )
+        return shops
+
+    return _cached(("varus_shops",), load)
+
+
+def get_novus_cities() -> list[dict]:
+    """Міста Новуса з ID, які приймає API списку магазинів."""
+
+    def load() -> list[dict]:
+        resp = get(NOVUS_HOME_URL)
+        match = re.search(
+            r'"cityList"\s*:\s*(\{.*?\})\s*,\s*"shopList"', resp.text, re.DOTALL
+        )
+        if not match:
+            return [{"id": "1", "name": "Київ"}]
+        try:
+            items = json.loads(match.group(1)).get("items") or []
+        except (ValueError, AttributeError):
+            return [{"id": "1", "name": "Київ"}]
+        cities = [
+            {"id": str(item.get("entity_id")), "name": str(item.get("name") or "")}
+            for item in items
+            if item.get("entity_id")
+        ]
+        return cities or [{"id": "1", "name": "Київ"}]
+
+    return _cached(("novus_cities",), load)
+
+
+def get_novus_shops(lat: float | None = None, lon: float | None = None) -> list[dict]:
+    """Магазини Новуса з координатами.
+
+    Поблизу Києва запитуємо тільки `cityId=1`, бо це основна аудиторія
+    бота й перший холодний запит інакше триває надто довго.
+    """
+
+    kyiv_only = (
+        lat is not None
+        and lon is not None
+        and distance_km(lat, lon, *KYIV_CENTER) <= 60
+    )
+
+    def load() -> list[dict]:
+        def fetch(city: dict) -> list[dict]:
+            try:
+                resp = post(
+                    NOVUS_SHOPS_URL,
+                    data={"cityId": city["id"]},
+                    headers={
+                        **HEADERS,
+                        "Accept": "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": NOVUS_HOME_URL,
+                    },
+                )
+                payload = resp.json()
+                if payload.get("errors"):
+                    return []
+                rows = (payload.get("data") or {}).values()
+            except Exception as exc:  # noqa: BLE001 — одне місто не блокує інші
+                print(f"[novus] Не вдалося отримати магазини {city.get('name')}: {exc}", flush=True)
+                return []
+            city_shops: list[dict] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    shop_lat, shop_lon = float(row["lat"]), float(row["lng"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                shop_id = str(row.get("entity_id") or "").strip()
+                if not shop_id:
+                    continue
+                city_shops.append(
+                    {
+                        "id": shop_id,
+                        "name": str(row.get("name") or ""),
+                        "address": str(row.get("address") or city.get("name") or ""),
+                        "city": str(city.get("name") or ""),
+                        "latitude": shop_lat,
+                        "longitude": shop_lon,
+                    }
+                )
+            return city_shops
+
+        cities = (
+            [{"id": "1", "name": "Київ"}]
+            if kyiv_only
+            else get_novus_cities()
+        )
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            groups = list(executor.map(fetch, cities))
+        shops: list[dict] = []
+        seen: set[str] = set()
+        for group in groups:
+            for shop in group:
+                if shop["id"] in seen:
+                    continue
+                seen.add(shop["id"])
+                shops.append(shop)
+        return shops
+
+    return _cached(("novus_shops", "kyiv" if kyiv_only else "all"), load)
+
+
+def resolve_location(
+    lat: float | str | None = None,
+    lon: float | str | None = None,
+    address: str = "",
+) -> dict:
+    """Привести гео/адресу до координат і найближчого відділення."""
+    address = str(address or "").strip()[:200]
+    try:
+        lat_f = float(lat) if lat not in (None, "") else None
+        lon_f = float(lon) if lon not in (None, "") else None
+    except (TypeError, ValueError):
+        lat_f = lon_f = None
+
+    source = "geo" if lat_f is not None and lon_f is not None else ""
+    if source != "geo":
+        branch = find_silpo_branch_by_address(address) if address else None
+        if branch:
+            lat_f, lon_f = branch["latitude"], branch["longitude"]
+            source = "address"
+        else:
+            lat_f, lon_f = KYIV_CENTER
+            source = "center"
+
+    branches = nearest_silpo_branches(lat_f, lon_f, 3)
+    result: dict[str, Any] = {
+        "lat": lat_f,
+        "lon": lon_f,
+        "address": address,
+        "source": source,
+        "branch": branches[0] if branches else None,
+        "branches": branches,
+    }
+    # Для кожної мережі вибираємо найближчий магазин саме за її даними.
+    def nearest_from(getter: Callable[[], list[dict]]) -> dict | None:
+        shops = getter()
+        return _nearest_item(shops, lat_f, lon_f) if shops else None
+
+    for key, finder in (
+        ("atb", lambda: (get_atb_nearby_stores(lat_f, lon_f, 1) or [None])[0]),
+        ("varus", lambda: nearest_from(get_varus_shops)),
+        (
+            "novus",
+            lambda: nearest_from(lambda: get_novus_shops(lat_f, lon_f)),
+        ),
+    ):
+        try:
+            result[key] = finder()
+        except Exception as exc:  # noqa: BLE001 — локація однієї мережі не блокує пошук
+            print(f"[{key}] Не вдалося вибрати найближчий магазин: {exc}", flush=True)
+            result[key] = None
+    return result
 
 
 AMOUNT_RE = re.compile(
@@ -249,6 +660,7 @@ def make_product(
     form: Optional[str] = None,
     image: str = "",
     on_sale: bool = False,
+    sale_channel: str = "онлайн",
 ) -> Optional[Product]:
     try:
         price_f = float(price)
@@ -300,11 +712,19 @@ def make_product(
         form=form or detect_form(clean_name),
         image=str(image or "").strip(),
         on_sale=bool(on_sale or old_f is not None),
+        sale_channel=sale_channel or "онлайн",
     )
 
 
-def search_silpo(query: str, limit: int) -> list[Product]:
-    url = f"https://sf-ecom-api.silpo.ua/v1/uk/branches/{SILPO_BRANCH}/products"
+def search_silpo(
+    query: str,
+    limit: int,
+    branch_id: str | None = None,
+    location: dict | None = None,
+) -> list[Product]:
+    """Ціни конкретного відділення; без branch_id — типове відділення."""
+    branch = (branch_id or SILPO_BRANCH).strip()
+    url = f"https://sf-ecom-api.silpo.ua/v1/uk/branches/{branch}/products"
     resp = get(
         url,
         params={"search": query, "limit": limit, "inStock": "true"},
@@ -334,6 +754,8 @@ def search_silpo(query: str, limit: int) -> list[Product]:
                     for p in (item.get("promotions") or [])
                 )
             ),
+            # Це ціни онлайн-каталогу конкретного відділення, не ціна на полиці.
+            sale_channel="онлайн",
         )
         if product:
             products.append(product)
@@ -352,12 +774,14 @@ def _flatten_atb_items(raw) -> list[dict]:
     return []
 
 
-def search_atb(query: str, limit: int) -> list[Product]:
+def search_atb(query: str, limit: int, location: dict | None = None) -> list[Product]:
+    atb_shop = (location or {}).get("atb") or {}
     params = {
         "id": ATB_MS_ID,
         "key": ATB_MS_KEY,
         "lang": "uk",
-        "location": "498",
+        # Кожен магазин АТБ має власний location у пошуку — ціни відрізняються.
+        "location": str(atb_shop.get("id") or "1154"),
         "m": str(int(time.time() * 1000)),
         "q": uuid.uuid4().hex[:6],
         "query": query,
@@ -412,7 +836,12 @@ def search_atb(query: str, limit: int) -> list[Product]:
     return products
 
 
-def search_varus(query: str, limit: int) -> list[Product]:
+def search_varus(query: str, limit: int, location: dict | None = None) -> list[Product]:
+    varus_shop = (location or {}).get("varus") or {}
+    try:
+        shop_id = int(varus_shop.get("id") or VARUS_SHOP_ID)
+    except (TypeError, ValueError):
+        shop_id = VARUS_SHOP_ID
     resp = get(
         "https://api.multisearch.io/",
         params={
@@ -450,7 +879,7 @@ def search_varus(query: str, limit: int) -> list[Product]:
         "availability{inStock available}"
     )
     parts = [
-        f'p{i}: product(id:"{pid}", shopId:{VARUS_SHOP_ID}, '
+        f'p{i}: product(id:"{pid}", shopId:{shop_id}, '
         f"regionId:{VARUS_REGION_ID}){{{fields}}}"
         for i, pid in enumerate(ids)
     ]
@@ -498,8 +927,21 @@ def search_varus(query: str, limit: int) -> list[Product]:
     return products
 
 
-def search_novus(query: str, limit: int) -> list[Product]:
-    resp = get("https://novus.ua/catalogsearch/result/", params={"q": query})
+def search_novus(query: str, limit: int, location: dict | None = None) -> list[Product]:
+    novus_shop = (location or {}).get("novus") or {}
+    shop_id = str(novus_shop.get("id") or "")
+    if shop_id:
+        # Сайт зберігає обраний магазин у cookie novus_shop.
+        session = _session()
+        session.cookies.set("novus_shop", shop_id, domain=".novus.ua", path="/")
+        resp = session.get(
+            "https://novus.ua/catalogsearch/result/",
+            params={"q": query},
+            headers={**HEADERS, "Accept": "text/html"},
+            timeout=TIMEOUT,
+        )
+    else:
+        resp = get("https://novus.ua/catalogsearch/result/", params={"q": query})
     soup = BeautifulSoup(resp.text, "html.parser")
 
     products: list[Product] = []
@@ -530,7 +972,7 @@ def search_novus(query: str, limit: int) -> list[Product]:
     return products
 
 
-def search_thrash(query: str, limit: int) -> list[Product]:
+def search_thrash(query: str, limit: int, location: dict | None = None) -> list[Product]:
     graphql = (
         "{search(query:%s,pagingInfo:{limit:%d,offset:0})"
         "{paging{count items{id slug title price oldPrice weight available imageUrl}}}}"
@@ -601,7 +1043,7 @@ def _velmart_meta(ids: list[Any]) -> dict[str, dict]:
     return _cached(("velmart_meta", tuple(clean_ids)), load)
 
 
-def search_velmart(query: str, limit: int) -> list[Product]:
+def search_velmart(query: str, limit: int, location: dict | None = None) -> list[Product]:
     resp = get(
         "https://velmart.ua/wp-json/wc/store/products",
         params={"search": query, "per_page": min(max(limit, 1), 100)},
@@ -640,7 +1082,7 @@ def search_velmart(query: str, limit: int) -> list[Product]:
     return products
 
 
-StoreFunc = Callable[[str, int], list[Product]]
+StoreFunc = Callable[[str, int, dict | None], list[Product]]
 
 STORES: dict[str, tuple[str, StoreFunc]] = {
     "silpo": ("Сільпо", search_silpo),
@@ -726,15 +1168,42 @@ def find_products(
     limit: int = 20,
     *,
     filter_mode: str = "auto",
+    location: dict | None = None,
 ) -> tuple[list[Product], list[tuple[str, str]]]:
     store_keys = list(store_keys or STORES)
     all_products: list[Product] = []
     errors: list[tuple[str, str]] = []
+    loc = location or {}
+    branch_ids = [
+        item["branch_id"]
+        for item in (loc.get("branches") or [])
+        if isinstance(item, dict) and item.get("branch_id")
+    ]
+    if not branch_ids:
+        branch_info = loc.get("branch") or {}
+        if branch_info.get("branch_id"):
+            branch_ids = [branch_info["branch_id"]]
+
+    # Ключ кешу враховує обраний магазин кожної мережі.
+    location_key = (
+        tuple(branch_ids),
+        str(((loc.get("atb") or {}).get("id")) or ""),
+        str(((loc.get("varus") or {}).get("id")) or ""),
+        str(((loc.get("novus") or {}).get("id")) or ""),
+    )
 
     def load_store(key: str) -> list[Product]:
+        if key == "silpo":
+            def load_silpo() -> list[Product]:
+                result: list[Product] = []
+                for branch_id in branch_ids or [None]:
+                    result.extend(search_silpo(query, limit, branch_id, loc))
+                return result
+
+            return _cached(("store", key, query, limit, location_key), load_silpo)
         return _cached(
-            ("store", key, query, limit),
-            lambda: STORES[key][1](query, limit),
+            ("store", key, query, limit, location_key),
+            lambda: STORES[key][1](query, limit, loc),
         )
 
     with ThreadPoolExecutor(max_workers=max(1, len(store_keys))) as executor:
@@ -805,11 +1274,13 @@ def search_sales(
     category: str,
     store_keys: Optional[list[str]] = None,
     limit: int = 20,
+    *,
+    location: dict | None = None,
 ) -> tuple[list[Product], list[tuple[str, str]]]:
     """Товари за акцією у вибраній категорії."""
     _, query = SALE_CATEGORIES.get(category, SALE_CATEGORIES["all"])
     products, errors = find_products(
-        query or "продукт", store_keys, limit, filter_mode="all"
+        query or "продукт", store_keys, limit, filter_mode="all", location=location
     )
     sales = [p for p in products if p.on_sale or p.old_price]
     sales.sort(key=lambda p: (-p.discount_percent, p.price))

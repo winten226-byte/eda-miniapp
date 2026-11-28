@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 from pathlib import Path
@@ -26,9 +27,11 @@ from aiogram.types import (
     WebAppInfo,
 )
 
+from price_finder import resolve_location
 from stats_store import StatsStore
 
 HERE = Path(__file__).resolve().parent
+FEEDBACK_PAGE_SIZE = 10
 
 # Якщо потрібна картинка за посиланням — вставте URL сюди.
 # Інакше використовується локальний файл assets/start.png.
@@ -49,12 +52,17 @@ START_CAPTION = (
 INFO_TEXT = (
     "ℹ️ Інформація\n\n"
     "Бот порівнює ціни в українських супермаркетах.\n"
+    "Натисніть «📍 Моє місце» або вкажіть адресу в Mini App — "
+    "тоді для Сільпо візьмемо асортимент трьох найближчих відділень, "
+    "а для АТБ, Варуса й Новуса — ціни й наявність у найближчому магазині.\n\n"
     "У Mini App три вкладки знизу:\n"
     "🔍 Пошук — пошук товару за назвою;\n"
     "🏷️ Акції — товари зі знижкою, з вибором категорії "
     "і магазинів;\n"
     "💬 Відгук — надішліть ідею або повідомте про несправність.\n\n"
-    "Є сортування за ціною, ціною за кг/л та розміром знижки."
+    "Є сортування за ціною, ціною за кг/л та розміром знижки.\n"
+    "Бейдж «знижка онлайн» означає ціну з каталогу: офлайн-акції "
+    "у магазині можуть відрізнятися."
 )
 
 
@@ -77,7 +85,8 @@ def build_inline_kb(url: str) -> InlineKeyboardMarkup:
 def build_reply_kb(url: str = "") -> ReplyKeyboardMarkup:
     """Постійні кнопки під полем вводу."""
     rows: list[list[KeyboardButton]] = [
-        [KeyboardButton(text="ℹ️ Інформація"), KeyboardButton(text="💬 Відгук")]
+        [KeyboardButton(text="ℹ️ Інформація"), KeyboardButton(text="💬 Відгук")],
+        [KeyboardButton(text="📍 Моє місце", request_location=True)],
     ]
     if url:
         rows.append([KeyboardButton(text="🚀 Відкрити", web_app=WebAppInfo(url=url))])
@@ -96,6 +105,42 @@ def user_label(user: User) -> str:
     username = getattr(user, "username", None)
     name = getattr(user, "full_name", None) or getattr(user, "first_name", None) or "Невідомий"
     return f"{name} (@{username})" if username else str(name)
+
+
+def feedbacks_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
+    """Кнопки листування відгуків: page=1 — найновіші."""
+    buttons: list[InlineKeyboardButton] = []
+    if page > 1:
+        buttons.append(
+            InlineKeyboardButton(
+                text="⬅️ Новіші", callback_data=f"fbpage:{page - 1}"
+            )
+        )
+    if page * FEEDBACK_PAGE_SIZE < total:
+        buttons.append(
+            InlineKeyboardButton(
+                text="Старіші ➡️", callback_data=f"fbpage:{page + 1}"
+            )
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[buttons] if buttons else [])
+
+
+def format_feedbacks(items: list[dict], page: int, total: int) -> str:
+    lines = [
+        f"💬 <b>Відгуки</b> · сторінка {page} · усього {total}",
+        "",
+    ]
+    for item in items:
+        label = FEEDBACK_CATEGORIES.get(item.get("category", ""), "✍️ Інше")
+        who = html.escape(item.get("name") or "Невідомий")
+        if item.get("username"):
+            who += f" (@{html.escape(item['username'])})"
+        text = html.escape(str(item.get("text", ""))[:300])
+        lines.append(
+            f"#{item.get('id')} [{label}] від {who}\n{text}\n"
+            f"<i>{html.escape(str(item.get('created_at', ''))[:16])}</i>\n"
+        )
+    return "\n".join(lines)
 
 
 def format_summary(summary: dict) -> str:
@@ -135,6 +180,7 @@ def register_handlers(
     *,
     get_url: Callable[[], str],
     save_url: Callable[[str], None],
+    reset_url: Callable[[], None],
     stats: StatsStore,
     bot: Bot,
 ) -> None:
@@ -199,6 +245,64 @@ def register_handlers(
         stats.touch(message.from_user, "app")
         await message.answer("Запускайте Mini App:", reply_markup=build_inline_kb(url))
 
+    @dp.message(F.location)
+    async def cmd_location(message: Message) -> None:
+        location = message.location
+        lat, lon = float(location.latitude), float(location.longitude)
+        stats.set_location(message.from_user, lat, lon)
+        try:
+            # Пошук магазинів робить кілька мережевих запитів — не блокуємо бота.
+            location = await asyncio.to_thread(resolve_location, lat, lon)
+        except Exception as exc:  # noqa: BLE001 — гео збережено навіть без API магазинів
+            print(f"[location] Не вдалося визначити магазини: {exc}", flush=True)
+            location = {}
+
+        def label(item: dict) -> str:
+            parts = [
+                str(item.get(key) or "")
+                for key in ("name", "city", "address")
+                if item.get(key)
+            ]
+            where = parts[0] if parts else ""
+            for part in parts[1:]:
+                if part not in where:
+                    where = " ".join(filter(None, (where, part)))
+            distance = item.get("distance_km")
+            dist = f" · ~{distance} км" if distance is not None else ""
+            return f"• <b>{html.escape(where or 'найближчий магазин')}</b>{dist}"
+
+        lines: list[str] = []
+        branches = location.get("branches") or []
+        if not branches and location.get("branch"):
+            branches = [location["branch"]]
+        if branches:
+            lines.append("<b>Сільпо:</b>")
+            lines.extend(label(branch) for branch in branches)
+        for key, title in (("atb", "АТБ"), ("varus", "Варус"), ("novus", "Новус")):
+            shop = location.get(key)
+            if shop:
+                lines.append(f"<b>{title}:</b>")
+                lines.append(label(shop))
+
+        if lines:
+            text = (
+                "📍 Геолокацію збережено. Обрано найближчі магазини:\n"
+                + "\n".join(lines)
+                + "\n\nЦіни й асортимент беремо саме з цих магазинів.\n"
+            )
+        else:
+            text = (
+                "📍 Геолокацію збережено, але список найближчих магазинів "
+                "тимчасово недоступний.\n\n"
+            )
+        text += (
+            "Для Траш і Велмарт — ціни сайту без прив'язки до магазину.\n"
+            "Знижки в боті — з онлайн-каталогів; офлайн-акції можуть відрізнятися."
+        )
+        url = get_url()
+        markup = build_inline_kb(url) if url else build_reply_kb()
+        await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
     @dp.message(Command("seturl"))
     async def cmd_seturl(message: Message) -> None:
         if stats.admin_ids and message.from_user.id not in stats.admin_ids:
@@ -216,9 +320,25 @@ def register_handlers(
         new_url = parts[1].strip().rstrip("/")
         save_url(new_url)
         await message.answer(
-            f"Посилання оновлено: <code>{html.escape(new_url)}</code>",
+            f"Посилання оновлено: <code>{html.escape(new_url)}</code>\n\n"
+            "/seturl зберігає HTTPS-адресу Mini App у <code>webapp_url.txt</code> "
+            "і перевизначає <code>WEBAPP_URL</code>, доки не виконаєте /reseturl.\n"
+            "На безплатному Render цей файл зникне після перезапуску — "
+            "для постійної зміни оновіть <code>WEBAPP_URL</code> у налаштуваннях сервісу.",
             parse_mode="HTML",
             reply_markup=build_inline_kb(new_url),
+        )
+
+    @dp.message(Command("reseturl"))
+    async def cmd_reseturl(message: Message) -> None:
+        if stats.admin_ids and message.from_user.id not in stats.admin_ids:
+            await message.answer("Ця команда доступна лише адміністраторам.")
+            return
+        reset_url()
+        await message.answer(
+            "Перевизначення знято. Знову використовується WEBAPP_URL "
+            "або tunnel_url.txt.",
+            reply_markup=build_reply_kb(get_url()),
         )
 
     @dp.message(Command("stats"))
@@ -244,22 +364,50 @@ def register_handlers(
         if not stats.admin_ids or message.from_user.id not in stats.admin_ids:
             await message.answer("Ця команда доступна лише адміністраторам.")
             return
-        items = stats.recent_feedbacks(5)
-        if not items:
+        parts = (message.text or "").split(maxsplit=1)
+        page = 1
+        if len(parts) > 1 and parts[1].strip().isdigit():
+            page = max(1, int(parts[1].strip()))
+        total = stats.feedback_total()
+        if not total:
             await message.answer("Відгуків поки немає.")
             return
-        lines = ["💬 <b>Останні відгуки</b>", ""]
-        for item in items:
-            label = FEEDBACK_CATEGORIES.get(item.get("category", ""), "✍️ Інше")
-            who = html.escape(item.get("name") or "Невідомий")
-            if item.get("username"):
-                who += f" (@{html.escape(item['username'])})"
-            text = html.escape(str(item.get("text", ""))[:300])
-            lines.append(
-                f"#{item.get('id')} [{label}] від {who}\n{text}\n"
-                f"<i>{html.escape(str(item.get('created_at', ''))[:16])}</i>\n"
-            )
-        await message.answer("\n".join(lines), parse_mode="HTML")
+        items = stats.recent_feedbacks(FEEDBACK_PAGE_SIZE, page)
+        if not items:
+            await message.answer("Такої сторінки немає.")
+            return
+        await message.answer(
+            format_feedbacks(items, page, total),
+            parse_mode="HTML",
+            reply_markup=feedbacks_keyboard(page, total),
+        )
+
+    @dp.callback_query(F.data.startswith("fbpage:"))
+    async def feedbacks_page(callback: CallbackQuery) -> None:
+        if not stats.admin_ids or callback.from_user.id not in stats.admin_ids:
+            await callback.answer("Тільки для адміністраторів.", show_alert=True)
+            return
+        try:
+            page = max(1, int((callback.data or "").split(":", 1)[1]))
+        except (IndexError, ValueError):
+            page = 1
+        total = stats.feedback_total()
+        items = stats.recent_feedbacks(FEEDBACK_PAGE_SIZE, page)
+        if not items:
+            await callback.answer("Такої сторінки немає.", show_alert=True)
+            return
+        await callback.answer()
+        text = format_feedbacks(items, page, total)
+        markup = feedbacks_keyboard(page, total)
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    text, parse_mode="HTML", reply_markup=markup
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 — старі повідомлення не редагуються
+                print(f"[feedbacks] Не вдалося змінити повідомлення: {exc}", flush=True)
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
 
     @dp.message(Command("feedback"))
     @dp.message(F.text == "💬 Відгук")

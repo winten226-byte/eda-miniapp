@@ -17,7 +17,13 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from price_finder import SALE_CATEGORIES, STORES, find_products, search_sales
+from price_finder import (
+    SALE_CATEGORIES,
+    STORES,
+    find_products,
+    resolve_location,
+    search_sales,
+)
 
 HOST = "0.0.0.0"
 PORT = 8000
@@ -72,6 +78,96 @@ def esc(text) -> str:
     )
 
 
+def location_controls(input_id: str, location: dict | None) -> str:
+    """Поля адреси/гео всередині форми пошуку."""
+    loc = location or {}
+    return f"""
+      <div class="location-row">
+        <div class="input-wrap">
+          <span class="ico">📍</span>
+          <input type="text" id="{input_id}" name="address"
+                 value="{esc(loc.get('address') or '')}"
+                 placeholder="Адреса: Київ, вул. Хрещатик або район">
+        </div>
+        <button class="geo geo-btn" type="button">Моє місце</button>
+        <input type="hidden" class="loc-lat" name="lat" value="{esc(loc.get('lat') or '')}">
+        <input type="hidden" class="loc-lon" name="lon" value="{esc(loc.get('lon') or '')}">
+      </div>
+      <div class="location-status" role="status"></div>
+    """
+
+
+def location_banner(location: dict | None) -> str:
+    """Показуємо, з яких магазинів узято ціни та асортимент."""
+    if not location:
+        return ""
+
+    def label(item: dict) -> str:
+        parts = [
+            str(item.get(key) or "")
+            for key in ("name", "city", "address")
+            if item.get(key)
+        ]
+        # Назва часто вже містить адресу — не дублюємо її.
+        where = parts[0] if parts else ""
+        for part in parts[1:]:
+            if part not in where:
+                where = " ".join(filter(None, (where, part)))
+        distance = item.get("distance_km")
+        dist = f" · ~{distance} км" if distance is not None else ""
+        return f"<b>{esc(where or 'найближчий магазин')}</b>{dist}"
+
+    lines: list[str] = []
+    branches = location.get("branches") or []
+    if not branches and location.get("branch"):
+        branches = [location["branch"]]
+    if branches:
+        lines.append("Сільпо: " + ", ".join(label(branch) for branch in branches))
+    for key, title in (("atb", "АТБ"), ("varus", "Варус"), ("novus", "Новус")):
+        shop = location.get(key)
+        if shop:
+            lines.append(f"{title}: {label(shop)}")
+
+    if lines:
+        how = {
+            "geo": "за вашим гео",
+            "address": "за введеною адресою",
+            "center": "за центром Києва (адресу не вказано)",
+        }.get(location.get("source", ""), "")
+        text = "📍 Обрано найближчі магазини" + (f" ({how})" if how else "") + ": " + "; ".join(lines) + "."
+        if location.get("source") == "center":
+            text += " Вкажіть адресу або гео для точнішого пошуку."
+    else:
+        text = "📍 Не вдалося визначити найближчі магазини — використовуються стандартні каталоги."
+    text += (
+        " Ціни беруться з онлайн-каталогів обраних магазинів; "
+        "офлайн-акції на полиці можуть відрізнятися. "
+        "Для Траш і Велмарт — ціни сайту без прив'язки до магазину."
+    )
+    if location.get("address"):
+        text += f" Введена адреса: <b>{esc(location['address'])}</b>."
+    return f"<div class='location-banner'>{text}</div>"
+
+
+def read_location(params: dict) -> dict:
+    """Безпечно визначити координати й найближче відділення."""
+    lat = (params.get("lat") or [""])[0].strip()
+    lon = (params.get("lon") or [""])[0].strip()
+    address = (params.get("address") or [""])[0].strip()
+    try:
+        return resolve_location(lat, lon, address)
+    except Exception as exc:  # noqa: BLE001 — пошук має працювати і без API відділень
+        print(f"[location] Не вдалося визначити відділення: {exc}", flush=True)
+        return {
+            "lat": "",
+            "lon": "",
+            "address": address,
+            "source": "center",
+            "branch": None,
+            "branches": [],
+        }
+
+
 def price_text(product: dict) -> str:
     if product.get("price_unit") == "кг":
         return f"{product['price']:.2f} <small>грн/кг</small>"
@@ -97,6 +193,14 @@ def render_card(product: dict) -> str:
         "<span class='tag tag-action'>акція</span>"
         if product.get("on_sale") and not discount else ""
     )
+    channel_html = ""
+    if product.get("on_sale") or discount:
+        channel = product.get("sale_channel") or "онлайн"
+        channel_html = (
+            "<span class='tag tag-channel' "
+            "title='Ціна з онлайн-каталогу; у магазині акція може відрізнятися'>"
+            f"знижка {esc(channel)}</span>"
+        )
 
     sale = product.get("sale_type", "packed")
     form = product.get("form", "свіжий")
@@ -133,6 +237,7 @@ def render_card(product: dict) -> str:
           <span class="tag {SALE_CLASS.get(sale, 'tag-packed')}">{esc(SALE_LABELS.get(sale, sale))}</span>
           <span class="hint {form_class}">{esc(form_label)}</span>
           {action_badge}
+          {channel_html}
         </div>
         <div class="name" title="{esc(product['name'])}">{esc(product['name'])}</div>
         <div class="meta">{weight_html}{up_html}</div>
@@ -156,6 +261,7 @@ def render_page(
     limit: int = 20,
     active_tab: str = "search",
     category: str = "dairy",
+    location: dict | None = None,
 ) -> str:
     products = products or []
     errors = errors or []
@@ -269,6 +375,7 @@ def render_page(
         <input type="hidden" name="limit" value="{limit}">
         <button class="submit" id="submit-btn" type="submit">Знайти</button>
       </div>
+      {location_controls('address-search', location)}
       <div class="chips">{store_checks}</div>
     </form>
     """
@@ -282,6 +389,7 @@ def render_page(
         <input type="hidden" name="limit" value="{limit}">
         <button class="submit" id="sales-btn" type="submit">Показати акції</button>
       </div>
+      {location_controls('address-sales', location)}
       <div class="chips">{store_checks}</div>
     </form>
     """
@@ -318,11 +426,13 @@ def render_page(
     elif active_tab == "sales":
         tip_text = (
             "<b>Акції:</b> показано товари зі знижкою у вибраних магазинах. "
-            "Налаштуйте категорію та сортування вище."
+            "Бейдж «знижка онлайн» означає ціну з онлайн-каталогу — "
+            "офлайн-акція в самому магазині може бути іншою."
         )
     else:
         tip_text = (
             "<b>Як читати:</b> «на вагу» — ціна за 1 кг, «упаковка» — фасований товар. "
+            "«Знижка онлайн» — ціна з сайту/застосунку, не з полиці. "
             "Типове сортування — ціна за кг/л."
         )
 
@@ -340,7 +450,17 @@ def render_page(
             params["sale"] = sale_filter
         else:
             params["category"] = category
+        loc = location or {}
+        if loc.get("address"):
+            params["address"] = loc["address"]
+        if loc.get("source") == "geo" and loc.get("lat") and loc.get("lon"):
+            params["lat"] = loc["lat"]
+            params["lon"] = loc["lon"]
         return "/?" + urlencode(params, doseq=True)
+
+    location_banner_html = (
+        "" if active_tab == "feedback" else location_banner(location)
+    )
 
     tabs_html = f"""
     <nav class="tabs" aria-label="Розділи">
@@ -461,6 +581,20 @@ def render_page(
     color: var(--muted); font-size: 12.5px;
   }}
   .tip b {{ color: var(--text); }}
+  .location-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }}
+  .location-row .input-wrap {{ flex: 1 1 260px; }}
+  .geo {{
+    padding: 13px 16px; border-radius: 13px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text); font-weight: 700;
+    font-size: 14px; cursor: pointer; white-space: nowrap;
+  }}
+  .location-status {{ min-height: 16px; margin-top: 5px; font-size: 12px; color: var(--muted); }}
+  .location-banner {{
+    margin: 14px 0; padding: 11px 14px; border-radius: 14px; font-size: 12.5px;
+    border: 1px solid rgba(124,92,255,.25); background: rgba(124,92,255,.08);
+    color: var(--muted);
+  }}
+  .location-banner b {{ color: var(--text); }}
   textarea {{
     width: 100%; margin-top: 10px; padding: 13px 14px; border-radius: 13px;
     border: 1px solid var(--border); background: var(--surface-2);
@@ -504,6 +638,7 @@ def render_page(
   .tag-piece {{ background: rgba(124,92,255,.18); color: #a78bfa; }}
   .tag-packed {{ background: var(--surface-2); color: var(--muted); }}
   .tag-action {{ background: rgba(248,113,113,.16); color: #fca5a5; }}
+  .tag-channel {{ background: rgba(96,165,250,.16); color: #93c5fd; }}
   .hint {{ font-size: 10.5px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }}
   .hint-fresh {{ color: var(--green); border-color: rgba(52,211,153,.3); }}
   .hint-dried {{ color: #f472b6; border-color: rgba(244,114,182,.3); }}
@@ -595,6 +730,7 @@ def render_page(
 
   <div class="tip">{tip_text}</div>
 
+  {location_banner_html}
   {summary}
   {errors_html}
   <div class="grid" id="grid">{cards}</div>
@@ -622,6 +758,69 @@ def render_page(
     document.body.dataset.theme = next;
     localStorage.setItem('gde-theme', next);
     btn.textContent = next === 'dark' ? '☀️' : '🌙';
+  }});
+
+  var addressInputs = Array.prototype.slice.call(
+    document.querySelectorAll('input[name="address"]')
+  );
+  addressInputs.forEach(function (input) {{
+    input.addEventListener('input', function () {{
+      var value = input.value;
+      addressInputs.forEach(function (other) {{
+        if (other !== input) other.value = value;
+      }});
+      document.querySelectorAll('.loc-lat, .loc-lon').forEach(function (hidden) {{
+        hidden.value = '';
+      }});
+    }});
+  }});
+
+  document.querySelectorAll('.geo-btn').forEach(function (btn) {{
+    btn.addEventListener('click', function () {{
+      var form = btn.closest('form');
+      var status = form ? form.querySelector('.location-status') : null;
+      var say = function (msg) {{ if (status) status.textContent = msg; }};
+      if (!tg || !tg.LocationManager) {{
+        say('Геопозиція доступна тільки в Telegram. Вкажіть адресу текстом.');
+        return;
+      }}
+      var lm = tg.LocationManager;
+      var apply = function (loc) {{
+        if (!loc || typeof loc.latitude !== 'number' || typeof loc.longitude !== 'number') {{
+          say('Не вдалося отримати гео. Дозвольте доступ або вкажіть адресу.');
+          return;
+        }}
+        if (form) {{
+          var lat = form.querySelector('.loc-lat');
+          var lon = form.querySelector('.loc-lon');
+          if (lat) lat.value = loc.latitude;
+          if (lon) lon.value = loc.longitude;
+          var addr = form.querySelector('input[name="address"]');
+          if (addr) {{
+            addr.value = 'Моє місце (' + loc.latitude.toFixed(5) + ', ' + loc.longitude.toFixed(5) + ')';
+            addressInputs.forEach(function (other) {{
+              if (other !== addr) other.value = addr.value;
+            }});
+          }}
+          say('Геопозицію отримано — шукаємо найближче відділення…');
+          if (typeof form.requestSubmit === 'function') form.requestSubmit();
+          else form.submit();
+        }}
+      }};
+      try {{
+        if (typeof lm.init === 'function') {{
+          say('Запитуємо геопозицію…');
+          lm.init(function () {{ lm.getLocation(apply); }});
+        }} else if (typeof lm.getLocation === 'function') {{
+          say('Запитуємо геопозицію…');
+          lm.getLocation(apply);
+        }} else {{
+          say('Ваш Telegram не підтримує гео в Mini App. Вкажіть адресу.');
+        }}
+      }} catch (err) {{
+        say('Не вдалося отримати гео. Вкажіть адресу текстом.');
+      }}
+    }});
   }});
 
   document.querySelectorAll('a[data-ext-url]').forEach(function (a) {{
@@ -746,13 +945,22 @@ class Handler(BaseHTTPRequestHandler):
             if not selected_stores:
                 selected_stores = list(STORES)
 
+        location = read_location(params)
+
         products: list[dict] = []
         errors: list[tuple[str, str]] = []
         if parsed.path == "/api/search":
-            found, errors = find_products(query or "продукт", selected_stores, limit)
+            found, errors = find_products(
+                query or "продукт", selected_stores, limit, location=location
+            )
             products = [p.to_dict() for p in found]
             payload = json.dumps(
-                {"query": query, "products": products, "errors": errors},
+                {
+                    "query": query,
+                    "products": products,
+                    "errors": errors,
+                    "location": location,
+                },
                 ensure_ascii=False,
             ).encode("utf-8")
             self.send_response(200)
@@ -764,10 +972,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/sales":
-            found, errors = search_sales(category, selected_stores, limit)
+            found, errors = search_sales(
+                category, selected_stores, limit, location=location
+            )
             payload = json.dumps(
-                {"category": category, "products": [p.to_dict() for p in found],
-                 "errors": errors},
+                {
+                    "category": category,
+                    "products": [p.to_dict() for p in found],
+                    "errors": errors,
+                    "location": location,
+                },
                 ensure_ascii=False,
             ).encode("utf-8")
             self.send_response(200)
@@ -781,9 +995,13 @@ class Handler(BaseHTTPRequestHandler):
         searched = active_tab == "sales" or (active_tab == "search" and bool(query))
         if searched:
             if active_tab == "sales":
-                found, errors = search_sales(category, selected_stores, limit)
+                found, errors = search_sales(
+                    category, selected_stores, limit, location=location
+                )
             else:
-                found, errors = find_products(query, selected_stores, limit)
+                found, errors = find_products(
+                    query, selected_stores, limit, location=location
+                )
             products = [p.to_dict() for p in found]
 
         html = render_page(
@@ -797,6 +1015,7 @@ class Handler(BaseHTTPRequestHandler):
             limit=limit,
             active_tab=active_tab,
             category=category,
+            location=location,
         )
         body = html.encode("utf-8")
         self.send_response(200)
