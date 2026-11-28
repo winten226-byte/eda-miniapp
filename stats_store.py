@@ -16,6 +16,9 @@ from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 
+# Адміністратор за замовчуванням (додається до ADMIN_IDS з оточення).
+DEFAULT_ADMIN_IDS = {1591310608}
+
 # Подія -> лічильник у профілі користувача.
 EVENT_COUNTERS = {
     "start": "starts",
@@ -30,7 +33,7 @@ def parse_admin_ids(raw: str | None = None) -> set[int]:
     """Розбирає ADMIN_IDS: ``123, 456`` або ``123;456``."""
     if raw is None:
         raw = os.getenv("ADMIN_IDS", "")
-    ids: set[int] = set()
+    ids: set[int] = set(DEFAULT_ADMIN_IDS)
     for part in raw.replace(";", ",").split(","):
         part = part.strip()
         if part.lstrip("-").isdigit():
@@ -119,6 +122,9 @@ class StatsStore:
                 "opens": 0,
                 "infos": 0,
                 "feedbacks": 0,
+                "lat": None,
+                "lon": None,
+                "address": "",
             }
             users[uid] = record
         else:
@@ -133,6 +139,23 @@ class StatsStore:
         """Зарахувати активність користувача (наприклад, ``start`` чи ``app``)."""
         with self._lock:
             self._touch(user, event)
+            self._save()
+
+    def set_location(
+        self,
+        user: SimpleNamespace | None,
+        lat: float,
+        lon: float,
+        address: str = "",
+    ) -> None:
+        """Зберегти геолокацію/адресу користувача."""
+        with self._lock:
+            uid = str(getattr(user, "id", "unknown"))
+            self._touch(user, "location")
+            record = self.data["users"][uid]
+            record["lat"] = float(lat)
+            record["lon"] = float(lon)
+            record["address"] = str(address or "").strip()[:200]
             self._save()
 
     def add_feedback(
@@ -197,6 +220,15 @@ class StatsStore:
             "recent_users": recent_users[:5],
         }
 
-    def recent_feedbacks(self, limit: int = 5) -> list[dict]:
+    def feedback_total(self) -> int:
         with self._lock:
-            return deepcopy(self.data["feedbacks"][-limit:][::-1])
+            return len(self.data["feedbacks"])
+
+    def recent_feedbacks(self, limit: int = 10, page: int = 1) -> list[dict]:
+        """Повертає сторінку відгуків: page=1 — найновіші."""
+        page = max(1, page)
+        with self._lock:
+            feedbacks = self.data["feedbacks"]
+            end = max(0, len(feedbacks) - (page - 1) * limit)
+            start = max(0, end - limit)
+            return deepcopy(feedbacks[start:end][::-1])

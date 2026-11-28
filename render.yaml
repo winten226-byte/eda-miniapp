@@ -24,7 +24,8 @@ services:
         value: "1"
       - key: BOT_TOKEN
         sync: false
-      # ID адміністраторів для /stats, /feedbacks і повідомлень про відгуки
+      # ID адміністраторів для /stats, /feedbacks і повідомлень про відгуки.
+      # 1591310608 уже доданий у stats_store.py — можна лишити порожнім.
       - key: ADMIN_IDS
         sync: false
       # Посилання на веб-сервіс підставляється автоматично
